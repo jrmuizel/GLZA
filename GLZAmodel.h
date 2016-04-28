@@ -24,20 +24,21 @@ enum { UP_FREQ_MTFG_QUEUE_POS = 2, FREQ_MTFG_QUEUE_POS_BOT = 0x4000 };
 enum { UP_FREQ_SID = 3, FREQ_SID_BOT = 0x1000 };
 enum { UP_FREQ_INST = 8, FREQ_INST_BOT = 0x8000 };
 enum { UP_FREQ_ERG = 1, FREQ_ERG_BOT = 0x20 };
+enum { UP_FREQ_FIRST_CHAR = 1, FREQ_FIRST_CHAR_BOT = 0x2000 };
 enum { NOT_CAP = 0, CAP = 1 };
 enum { LEVEL0 = 0, LEVEL0_CAP = 1, LEVEL1 = 2, LEVEL1_CAP = 3 };
 
 unsigned int NumInChar, InCharNum, OutCharNum;
-unsigned int RangeLow, RangeHigh, count, BaseSymbol, SymbolIndex, BinCode;
+unsigned int RangeLow, RangeHigh, count, BaseSymbol, SymbolIndex, BinCode, FirstChar, SymbolFirstChar[0x100][0x100];
 unsigned int low, code, range;
 unsigned char InData[BUF_SIZE], OutData[BUF_SIZE];
 unsigned char Symbol, SIDSymbol, FoundIndex, mtfg_queue_position, mtf_queue_number, Instances, CodeLength;
 unsigned char RangeScaleSymType[4], RangeScaleERG;
 unsigned char FreqSymType[4][4], FreqERG0;
 unsigned short int RangeScaleMtfQueueNum[2], RangeScaleMtfQueuePos[2][19], RangeScaleMtfgQueuePos[2];
-unsigned short int RangeScaleSID[2], RangeScaleINST[2][16];
+unsigned short int RangeScaleSID[2], RangeScaleINST[2][16], RangeScaleFirstChar[0x100];
 unsigned short int FreqMtfQueueNum[2][19], FreqMtfQueuePos[2][19][64], FreqMtfgQueuePos[2][256];
-unsigned short int FreqSID[2][16], FreqINST[2][16][41];
+unsigned short int FreqSID[2][16], FreqINST[2][16][41], FreqFirstChar[0x100][0x100];
 unsigned short int DictionaryBins, BinNum;
 FILE * InFile, * OutFile;
 
@@ -143,6 +144,16 @@ FILE * InFile, * OutFile;
   FreqERG0 = 1;            \
   RangeScaleERG = 2;       \
 }
+#define StartModelFirstChar() {      \
+  unsigned char i = 0xFF;            \
+  do {                               \
+    unsigned char j = 0xFF;          \
+    do {                             \
+      FreqFirstChar[i][j] = 0;       \
+    } while (j--);                   \
+    RangeScaleFirstChar[i] = 0;      \
+  } while (i--);                     \
+}
 #define rescaleSymType(Context) {                                                              \
   RangeScaleSymType[Context] = FreqSymType[Context][0] = (FreqSymType[Context][0] + 1) >> 1;   \
   RangeScaleSymType[Context] += FreqSymType[Context][1] = (FreqSymType[Context][1] + 1) >> 1;  \
@@ -189,6 +200,13 @@ FILE * InFile, * OutFile;
 #define rescaleERG() {                                    \
   RangeScaleERG = ((RangeScaleERG - FreqERG0) + 1) >> 1;  \
   RangeScaleERG += FreqERG0 = (FreqERG0 + 1) >> 1;        \
+}
+#define rescaleFirstChar(Context) {                                                                       \
+  unsigned char i = 0xFE;                                                                                 \
+  RangeScaleFirstChar[Context] = FreqFirstChar[Context][0xFF] = (FreqFirstChar[Context][0xFF] + 1) >> 1;  \
+  do {                                                                                                    \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;     \
+  } while (i--);                                                                                          \
 }
 #define ReadByte(File) {                                 \
   if (InCharNum != NumInChar)                            \
@@ -386,7 +404,7 @@ FILE * InFile, * OutFile;
 #define EncodeShortDictionarySymbol(Length, CodeBins) {  \
   NormalizeEncoder(1 << 12);                             \
   low += BinNum * (range /= DictionaryBins);             \
-  range = CodeBins * (range << (12 - Length));           \
+  range = CodeBins * (range << (12 - (Length)));         \
 }
 #define EncodeLongDictionarySymbol(CodeBins) {   \
   NormalizeEncoder(1 << 12);                     \
@@ -398,6 +416,33 @@ FILE * InFile, * OutFile;
 #define EncodeBaseSymbol(Bits) {         \
   NormalizeEncoder(1 << Bits);           \
   low += BaseSymbol * (range >>= Bits);  \
+}
+#define EncodeFirstChar(LastChar) {                                                       \
+  NormalizeEncoder(FREQ_FIRST_CHAR_BOT);                                                  \
+  if (Symbol == SymbolFirstChar[LastChar][0]) {                                           \
+    range = FreqFirstChar[LastChar][0] * (range / RangeScaleFirstChar[LastChar]);         \
+    FreqFirstChar[LastChar][0] += UP_FREQ_FIRST_CHAR;                                     \
+  }                                                                                       \
+  else {                                                                                  \
+    RangeLow = FreqFirstChar[LastChar][0];                                                \
+    FoundIndex = 1;                                                                       \
+    while (SymbolFirstChar[LastChar][FoundIndex] != Symbol)                               \
+      RangeLow += FreqFirstChar[LastChar][FoundIndex++];                                  \
+    low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                           \
+    range *= FreqFirstChar[LastChar][FoundIndex];                                         \
+    FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                            \
+    if (FreqFirstChar[LastChar][FoundIndex] > FreqFirstChar[LastChar][FoundIndex-1]) {    \
+      unsigned short int SavedFreq = FreqFirstChar[LastChar][FoundIndex];                 \
+      do {                                                                                \
+        FreqFirstChar[LastChar][FoundIndex] = FreqFirstChar[LastChar][FoundIndex-1];      \
+        SymbolFirstChar[LastChar][FoundIndex] = SymbolFirstChar[LastChar][FoundIndex-1];  \
+      } while ((--FoundIndex) && (SavedFreq > FreqFirstChar[LastChar][FoundIndex-1]));    \
+      FreqFirstChar[LastChar][FoundIndex] = SavedFreq;                                    \
+      SymbolFirstChar[LastChar][FoundIndex] = Symbol;                                     \
+    }                                                                                     \
+  }                                                                                       \
+  if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT)        \
+    rescaleFirstChar(LastChar);                                                           \
 }
 void InitEncoder(FILE* EncodedFile) {
   OutFile = EncodedFile;
@@ -415,6 +460,7 @@ void InitEncoder(FILE* EncodedFile) {
   StartModelSID();
   StartModelINST();
   StartModelERG();
+  StartModelFirstChar();
 }
 void FinishEncoder() {
   while (low ^ (low + range)) {
@@ -576,7 +622,7 @@ void FinishEncoder() {
 #define DecodeDictionaryBin(lookup_bits) {                                      \
   NormalizeDecoder(1 << 12);                                                    \
   CodeLength = lookup_bits[BinNum = (code - low) / (range /= DictionaryBins)];  \
-  char BitsUnderBinSize = 12 - CodeLength;                                      \
+  char BitsUnderBinSize = 12 + nbob_shift[FirstChar] - CodeLength;              \
   if (BitsUnderBinSize >= 0)                                                    \
     low += (range <<= BitsUnderBinSize) * (BinNum >> BitsUnderBinSize);         \
   else                                                                          \
@@ -591,7 +637,7 @@ void FinishEncoder() {
     SymbolIndex = (SymbolIndex + min_extra_reduce_index) >> 1;               \
     unsigned int index = SymbolIndex;                                        \
     unsigned int extra_code_bins = 0;                                        \
-    while ((symbol_type[SymbolArray[--index]] & 8) && (BinCode > 0)) {       \
+    while (BinCode && (symbol_type[SymbolArray[--index]] & 8)) {             \
       char bins = (index >= min_extra_reduce_index) ? 2 : 1;                 \
       BinCode -= bins;                                                       \
       extra_code_bins += bins;                                               \
@@ -606,7 +652,7 @@ void FinishEncoder() {
   else {                                                                     \
     unsigned int index = SymbolIndex;                                        \
     unsigned int extra_code_bins = 0;                                        \
-    while ((symbol_type[SymbolArray[--index]] & 8) && (BinCode > 0)) {       \
+    while (BinCode && (symbol_type[SymbolArray[--index]] & 8)) {             \
       BinCode--;                                                             \
       extra_code_bins++;                                                     \
     }                                                                        \
@@ -619,6 +665,35 @@ void FinishEncoder() {
 #define DecodeBaseSymbol(Bits) {                                  \
   NormalizeDecoder(1 << Bits);                                    \
   low += range * (BaseSymbol = (code - low) / (range >>= Bits));  \
+}
+#define DecodeFirstChar(LastChar) {                                                       \
+  NormalizeDecoder(FREQ_FIRST_CHAR_BOT);                                                  \
+  count = (code - low) / (range /= RangeScaleFirstChar[LastChar]);                        \
+  if ((RangeHigh = FreqFirstChar[LastChar][0]) > count) {                                 \
+    range *= RangeHigh;                                                                   \
+    FreqFirstChar[LastChar][0] = RangeHigh + UP_FREQ_FIRST_CHAR;                          \
+    FirstChar = SymbolFirstChar[LastChar][0];                                             \
+  }                                                                                       \
+  else {                                                                                  \
+    FoundIndex = 1;                                                                       \
+    while ((RangeHigh += FreqFirstChar[LastChar][FoundIndex]) <= count)                   \
+      FoundIndex++;                                                                       \
+    low += range * (RangeHigh - FreqFirstChar[LastChar][FoundIndex]);                     \
+    range *= FreqFirstChar[LastChar][FoundIndex];                                         \
+    FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                            \
+    FirstChar = SymbolFirstChar[LastChar][FoundIndex];                                    \
+    if (FreqFirstChar[LastChar][FoundIndex] > FreqFirstChar[LastChar][FoundIndex-1]) {    \
+      unsigned short int SavedFreq = FreqFirstChar[LastChar][FoundIndex];                 \
+      do {                                                                                \
+        FreqFirstChar[LastChar][FoundIndex] = FreqFirstChar[LastChar][FoundIndex-1];      \
+        SymbolFirstChar[LastChar][FoundIndex] = SymbolFirstChar[LastChar][FoundIndex-1];  \
+      } while ((--FoundIndex) && (SavedFreq > FreqFirstChar[LastChar][FoundIndex-1]));    \
+      FreqFirstChar[LastChar][FoundIndex] = SavedFreq;                                    \
+      SymbolFirstChar[LastChar][FoundIndex] = FirstChar;                                  \
+    }                                                                                     \
+  }                                                                                       \
+  if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT)        \
+    rescaleFirstChar(LastChar);                                                           \
 }
 void InitDecoder(FILE* EncodedFile) {
   InFile = EncodedFile;
@@ -640,5 +715,6 @@ void InitDecoder(FILE* EncodedFile) {
   StartModelSID();
   StartModelINST();
   StartModelERG();
+  StartModelFirstChar();
 }
 

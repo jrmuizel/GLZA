@@ -36,41 +36,44 @@ const unsigned int START_UTF8_3BYTE_SYMBOLS = 0x800;
 const unsigned int START_UTF8_4BYTE_SYMBOLS = 0x10000;
 const unsigned int START_MY_SYMBOLS = 0x00080000;
 const unsigned int READ_SIZE = 16000000;
-const unsigned int MAX_FILE_SYMBOLS = 220000000;
+const unsigned int MAX_FILE_SYMBOLS = 250000000;
 const unsigned int ESTIMATED_MTF_QUEUE_SPACE = 0x06000000;
 const unsigned int MAX_SYMBOLS_DEFINED = 0x00A00000;
 const unsigned char MAX_BITS_IN_CODE = 25;
 const unsigned int MAX_INSTANCES_FOR_MTF_QUEUE = 20;
 const unsigned int MTF_QUEUE_LENGTH = 64;
+const unsigned int INITIAL_LIST_SIZE = 0x800;
+const unsigned int BIG_LIST_SIZE = 0x400000;
 
-unsigned char UTF8_compliant, base_bits, cap_encoded, prior_is_cap, use_mtf;
-unsigned char in_data[16000003], symbol_is_nonergodic[0x00A00000];
+unsigned char UTF8_compliant, base_bits, cap_encoded, prior_is_cap, use_mtf, found_first_symbol, end_symbol;
+unsigned char in_data[16000003];
 unsigned char symbol_lengths[0x00A00000], symbol_starts_az[0x00A00000], symbol_ends_cap[0x00A00000];
+unsigned char symbol_is_nonergodic[0x00A00000], starts[0x00A00000], ends[0x00A00000];
+unsigned char over[0x101][26];
 unsigned char *in_char_ptr, *end_char_ptr;
-
-unsigned int num_define_symbols_written, num_regular_definitions;
-unsigned int num_symbols_to_code, mtf_overflow_symbols_to_code;
-unsigned int max_code_length, max_regular_code_length, mtf_queue_miss_code_space;
-unsigned int symbol_code_length, symbol_bits, symbol_index, symbol_to_move, table_index;
-unsigned int dictionary_bins, dictionary_bins_cap, min_extra_reduce_index;
-unsigned int symbol[220000000],symbol_count[0x00A00000], orig_symbol_count[0x00A00000], symbol_inst_found[0x00A00000];
-unsigned int sorted_symbols[0x00A00000], mtfg_hits[0x00A00000], mtfg_hits2[0x00A00000], *define_symbol_start_ptr[0x00A00000];
-unsigned int symbol_array_index[0x00A00000], symbol_array_index_cap[0x00A00000];
+char nbob_shift[0x101];
+unsigned int num_define_symbols_written, num_regular_definitions, num_symbols_to_code, mtf_overflow_symbols_to_code;
+unsigned int max_code_length, max_regular_code_length, mtf_queue_miss_code_space, min_extra_reduce_index;
+unsigned int symbol_code_length, symbol_bits, symbol_index, symbol_to_move, temp_bits, prior_end;
+unsigned int symbol[250000000];
+unsigned int symbol_count[0x00A00000], orig_symbol_count[0x00A00000], symbol_inst_found[0x00A00000];
+unsigned int symbol_array_index[0x00A00000], sorted_symbols[0x00A00000], *define_symbol_start_ptr[0x00A00000];
+unsigned int mtfg_hits[0x00A00000], mtfg_hits2[0x00A00000];
 unsigned int mtf_queue[21][65], mtf_queue_hit_count[21][65];
 unsigned int mtf_queue_started[21], mtf_queue_done[21], mtf_queue_peak[21], mtf_queue_size[21];
 unsigned int mtf_queue_overflow_code_length[21];
-unsigned int num_symbols_of_bits[26], num_symbols_of_bits_cap[26], num_bins_of_bits[26], num_bins_of_bits_cap[26];
-unsigned int first_bin_of_bits[26], first_bin_of_bits_cap[26];
-unsigned int symbol_array_of_bits[26][4000000], symbol_array_of_bits_cap[26][2000000];
 unsigned int mtfg_queue_0[8], mtfg_queue_8[8], mtfg_queue_16[0x10], mtfg_queue_32[0x20];
 unsigned int mtfg_queue_64[0x40], mtfg_queue_128[0x40], mtfg_queue_192[0x40];
 unsigned int mtfg_queue_8_offset, mtfg_queue_16_offset, mtfg_queue_32_offset;
 unsigned int mtfg_queue_64_offset, mtfg_queue_128_offset, mtfg_queue_192_offset;
 unsigned int *mtf_queue_ptr, *mtf_queue_end_ptr;
+unsigned int nsob[0x101][26], nexts[0x101][0x101];
 unsigned int *symbol_ptr, *first_define_ptr = 0;
+unsigned int *sym_list_ptrs[0x101][26];
+unsigned int nbob[0x101][26], sum_nbob[0x101];
+unsigned short int fbob[0x101][26];
 
 #include "GLZAmodel.h"
-
 
 
 
@@ -105,6 +108,78 @@ void print_string(unsigned int string_number) {
     while (symbol_ptr != next_symbol_ptr)
       print_string(*symbol_ptr++);
   }
+}
+
+
+void print_string2(unsigned int string_number) {
+  unsigned int *symbol_ptr, *next_symbol_ptr;
+  if (string_number < START_MY_SYMBOLS) {
+    if (UTF8_compliant) {
+      if (string_number < START_UTF8_2BYTE_SYMBOLS)
+        fprintf(stderr,"%c",string_number);
+      else if (string_number < START_UTF8_3BYTE_SYMBOLS) {
+        fprintf(stderr,"%c",(unsigned char)(string_number >> 6) + 0xC0);
+        fprintf(stderr,"%c",(unsigned char)(string_number & 0x3F) + 0x80);
+      }
+      else if (string_number < START_UTF8_4BYTE_SYMBOLS) {
+        fprintf(stderr,"%c",(unsigned char)(string_number >> 12) + 0xE0);
+        fprintf(stderr,"%c",(unsigned char)((string_number >> 6) & 0x3F) + 0x80);
+        fprintf(stderr,"%c",(unsigned char)(string_number & 0x3F) + 0x80);
+      }
+      else {
+        fprintf(stderr,"%c",(unsigned char)(string_number >> 18) + 0xF0);
+        fprintf(stderr,"%c",(unsigned char)((string_number >> 12) & 0x3F) + 0x80);
+        fprintf(stderr,"%c",(unsigned char)((string_number >> 6) & 0x3F) + 0x80);
+        fprintf(stderr,"%c",(unsigned char)(string_number & 0x3F) + 0x80);
+      }
+    }
+    else
+      fprintf(stderr,"%c",string_number);
+  }
+  else {
+    symbol_ptr = define_symbol_start_ptr[string_number-START_MY_SYMBOLS];
+    next_symbol_ptr = define_symbol_start_ptr[string_number-START_MY_SYMBOLS+1] - 1;
+    while (symbol_ptr != next_symbol_ptr)
+      print_string2(*symbol_ptr++);
+  }
+}
+
+
+void find_first(unsigned int string_number) {
+  unsigned int next_string_number = string_number;
+  while (next_string_number >= START_MY_SYMBOLS)
+    next_string_number = *define_symbol_start_ptr[next_string_number-START_MY_SYMBOLS];
+  starts[string_number] = (unsigned char)next_string_number;
+}
+
+
+void find_first_UTF8(unsigned int string_number) {
+  unsigned int next_string_number = string_number;
+  while (next_string_number >= START_MY_SYMBOLS)
+    next_string_number = *define_symbol_start_ptr[next_string_number-START_MY_SYMBOLS];
+  if (next_string_number < 0x80)
+    starts[string_number] = (unsigned char)next_string_number;
+  else
+    starts[string_number] = 0x80;
+}
+
+
+void find_last(unsigned int string_number) {
+  unsigned int next_string_number = string_number;
+  while (next_string_number >= START_MY_SYMBOLS)
+    next_string_number = *(define_symbol_start_ptr[next_string_number-START_MY_SYMBOLS+1] - 2);
+  ends[string_number] = (unsigned char)next_string_number;
+}
+
+
+void find_last_UTF8(unsigned int string_number) {
+  unsigned int next_string_number = string_number;
+  while (next_string_number >= START_MY_SYMBOLS)
+    next_string_number = *(define_symbol_start_ptr[next_string_number-START_MY_SYMBOLS+1] - 2);
+  if (next_string_number < 0x80)
+    ends[string_number] = (unsigned char)next_string_number;
+  else
+    ends[string_number] = 0x80;
 }
 
 
@@ -904,43 +979,30 @@ void print_string(unsigned int string_number) {
 } } } } } } } } } } } } } \
 
 
-#define update_code_table(symbol_bits) { \
-  num_bins_of_bits[symbol_bits]++; \
-  dictionary_bins++; \
-  for (table_index = symbol_bits + 1 ; table_index <= max_code_length ; table_index++) \
-    first_bin_of_bits[table_index]++; \
-}
-
-
-#define update_code_table_cap(symbol_bits) { \
-  num_bins_of_bits_cap[symbol_bits]++; \
-  dictionary_bins_cap++; \
-  for (table_index = symbol_bits + 1 ; table_index <= max_code_length ; table_index++) \
-    first_bin_of_bits_cap[table_index]++; \
-}
-
-
-inline void encode_dictionary_symbol() {
-  DictionaryBins = dictionary_bins;
-  if (CodeLength > 12) {
+inline void encode_dictionary_symbol(symbol) {
+  symbol_index = symbol_array_index[symbol];
+  Symbol = starts[symbol];
+  EncodeFirstChar(prior_end);
+  DictionaryBins = sum_nbob[Symbol];
+  if (CodeLength > 12 + nbob_shift[Symbol]) {
     unsigned int max_codes_in_bins, mcib;
     unsigned int reduce_bits = 0;
-    max_codes_in_bins = num_bins_of_bits[CodeLength] << (CodeLength - 12);
+    max_codes_in_bins = nbob[Symbol][CodeLength] << (CodeLength - (12 + nbob_shift[Symbol]));
     mcib = max_codes_in_bins >> 1;
-    while (mcib >= num_symbols_of_bits[CodeLength]) {
+    while (mcib >= nsob[Symbol][CodeLength]) {
       reduce_bits++;
       mcib = mcib >> 1;
     }
-    if (CodeLength - reduce_bits > 12) {
-      BinNum = first_bin_of_bits[CodeLength];
-      min_extra_reduce_index = 2 * num_symbols_of_bits[CodeLength] - (max_codes_in_bins >> reduce_bits);
+    if (CodeLength - reduce_bits > 12 + nbob_shift[Symbol]) {
+      BinNum = fbob[Symbol][CodeLength];
+      min_extra_reduce_index = 2 * nsob[Symbol][CodeLength] - (max_codes_in_bins >> reduce_bits);
       if (symbol_index >= min_extra_reduce_index) {
         int symbol_bins = 2;
         BinCode = 2 * symbol_index - min_extra_reduce_index;
-        unsigned int code_bin = BinCode >> (CodeLength - 12 - reduce_bits);
+        unsigned int code_bin = BinCode >> (CodeLength - (12 + nbob_shift[Symbol]) - reduce_bits);
         BinNum += code_bin;
-        BinCode -= code_bin << (CodeLength - 12 - reduce_bits);
-        while (BinCode && (symbol_is_nonergodic[symbol_array_of_bits[CodeLength][--symbol_index]] & 2)) {
+        BinCode -= code_bin << (CodeLength - (12 + nbob_shift[Symbol]) - reduce_bits);
+        while (BinCode && (symbol_is_nonergodic[sym_list_ptrs[Symbol][CodeLength][--symbol_index]] & 2)) {
           if (symbol_index >= min_extra_reduce_index) {
             symbol_bins += 2;
             BinCode -= 2;
@@ -950,18 +1012,18 @@ inline void encode_dictionary_symbol() {
             BinCode--;
           }
         }
-        CodeLength -= reduce_bits;
+        CodeLength -= reduce_bits + nbob_shift[Symbol];
         EncodeLongDictionarySymbol(symbol_bins);
       }
       else {
         BinCode = symbol_index;
         int symbol_bins = 1;
-        while ((BinCode & ((1 << (CodeLength - 12)) - 1))
-            && (symbol_is_nonergodic[symbol_array_of_bits[CodeLength][BinCode - 1]] & 2)) {
+        while ((BinCode & ((1 << (CodeLength - (12 + nbob_shift[Symbol]) - reduce_bits)) - 1))
+            && (symbol_is_nonergodic[sym_list_ptrs[Symbol][CodeLength][BinCode - 1]] & 2)) {
           symbol_bins++;
           BinCode--;
         }
-        CodeLength -= reduce_bits;
+        CodeLength -= reduce_bits + nbob_shift[Symbol];
         unsigned int code_bin = symbol_index >> (CodeLength - 12);
         BinNum += code_bin;
         BinCode -= code_bin << (CodeLength - 12);
@@ -970,100 +1032,28 @@ inline void encode_dictionary_symbol() {
     }
     else {
       int symbol_bins = 1;
-      while (symbol_index && (symbol_is_nonergodic[symbol_array_of_bits[CodeLength][symbol_index - 1]] & 2)) {
+      while (symbol_index && (symbol_is_nonergodic[sym_list_ptrs[Symbol][CodeLength][symbol_index - 1]] & 2)) {
         symbol_bins++;
         symbol_index--;
       }
-      BinNum = first_bin_of_bits[CodeLength] + symbol_index;
+      BinNum = fbob[Symbol][CodeLength] + symbol_index;
       EncodeShortDictionarySymbol(12, symbol_bins);
     }
   }
   else {
     int symbol_bins = 1;
-    while (symbol_index && (symbol_is_nonergodic[symbol_array_of_bits[CodeLength][symbol_index - 1]] & 2)) {
+    while (symbol_index && (symbol_is_nonergodic[sym_list_ptrs[Symbol][CodeLength][symbol_index - 1]] & 2)) {
       symbol_bins++;
       symbol_index--;
     }
-    BinNum = first_bin_of_bits[CodeLength] + (symbol_index << (12 - CodeLength));
-    EncodeShortDictionarySymbol(CodeLength, symbol_bins);
-  }
-}
-
-
-
-inline void encode_dictionary_symbol_cap() {
-  DictionaryBins = dictionary_bins_cap;
-  if (CodeLength > 12) {
-    unsigned int reduce_bits = 0;
-    unsigned int max_codes_in_bins, mcib;
-    max_codes_in_bins = num_bins_of_bits_cap[CodeLength] << (CodeLength - 12);
-    mcib = max_codes_in_bins >> 1;
-    while (mcib >= num_symbols_of_bits_cap[CodeLength]) {
-      reduce_bits++;
-      mcib = mcib >> 1;
-    }
-    if (CodeLength - reduce_bits > 12) {
-      BinNum = first_bin_of_bits_cap[CodeLength];
-      min_extra_reduce_index = 2 * num_symbols_of_bits_cap[CodeLength] - (max_codes_in_bins >> reduce_bits);
-      if (symbol_index >= min_extra_reduce_index) {
-        int symbol_bins = 2;
-        BinCode = 2 * symbol_index - min_extra_reduce_index;
-        unsigned int code_bin = BinCode >> (CodeLength - 12 - reduce_bits);
-        BinNum += code_bin;
-        BinCode -= code_bin << (CodeLength - 12 - reduce_bits);
-        while (BinCode && (symbol_is_nonergodic[symbol_array_of_bits_cap[CodeLength][--symbol_index]] & 2)) {
-          if (symbol_index >= min_extra_reduce_index) {
-            symbol_bins += 2;
-            BinCode -= 2;
-          }
-          else {
-            symbol_bins++;
-            BinCode--;
-          }
-        }
-        CodeLength -= reduce_bits;
-        EncodeLongDictionarySymbol(symbol_bins);
-      }
-      else {
-        BinCode = symbol_index;
-        int symbol_bins = 1;
-        while ((BinCode & ((1 << (CodeLength - 12)) - 1))
-            && (symbol_is_nonergodic[symbol_array_of_bits_cap[CodeLength][BinCode - 1]] & 2)) {
-          symbol_bins++;
-          BinCode--;
-        }
-        CodeLength -= reduce_bits;
-        unsigned int code_bin = symbol_index >> (CodeLength - 12);
-        BinNum += code_bin;
-        BinCode -= code_bin << (CodeLength - 12);
-        EncodeLongDictionarySymbol(symbol_bins);
-      }
-    }
-    else {
-      int symbol_bins = 1;
-      while (symbol_index && (symbol_is_nonergodic[symbol_array_of_bits_cap[CodeLength][symbol_index - 1]] & 2)) {
-        symbol_bins++;
-        symbol_index--;
-      }
-      BinNum = first_bin_of_bits_cap[CodeLength] + symbol_index;
-      EncodeShortDictionarySymbol(12, symbol_bins);
-    }
-  }
-  else {
-    int symbol_bins = 1;
-    while (symbol_index && (symbol_is_nonergodic[symbol_array_of_bits_cap[CodeLength][symbol_index - 1]] & 2)) {
-      symbol_bins++;
-      symbol_index--;
-    }
-    BinNum = first_bin_of_bits_cap[CodeLength] + (symbol_index << (12 - CodeLength));
-    EncodeShortDictionarySymbol(CodeLength, symbol_bins);
+    BinNum = fbob[Symbol][CodeLength] + (symbol_index << (12 + nbob_shift[Symbol] - CodeLength));
+    EncodeShortDictionarySymbol(CodeLength - nbob_shift[Symbol], symbol_bins);
   }
 }
 
 
 inline void update_mtf_queue(unsigned int this_symbol, unsigned int symbol_inst, unsigned int this_symbol_count) {
   unsigned int i1, mtf_queue_position;
-
   mtf_queue_position = MTF_QUEUE_LENGTH;
   if (symbol_inst != this_symbol_count - 1) { // not the last instance
     if (symbol_is_nonergodic[this_symbol]) {
@@ -1119,36 +1109,52 @@ inline void update_mtf_queue(unsigned int this_symbol, unsigned int symbol_inst,
 
 
 #define add_dictionary_symbol(symbol, bits) { \
-  symbol_index = num_symbols_of_bits[bits]++; \
-  symbol_array_of_bits[bits][symbol_index] = symbol; \
-  symbol_array_index[symbol] = symbol_index; \
-  while ((num_symbols_of_bits[bits] << (32 - bits)) > (num_bins_of_bits[bits] << 20)) { \
-    update_code_table(bits); \
+  unsigned char first_char = starts[symbol]; \
+  if ((nsob[first_char][bits] == INITIAL_LIST_SIZE) && (over[first_char][bits] == 0)) { \
+    over[first_char][bits] = 1; \
+    if ((sym_list_ptrs[first_char][bits] \
+        = (unsigned int *)realloc(sym_list_ptrs[first_char][bits], sizeof(unsigned int) * BIG_LIST_SIZE)) == 0) { \
+      fprintf(stderr,"\nERROR - out of memory\n"); \
+      exit(0); \
+    } \
+  } \
+  symbol_array_index[symbol] = nsob[first_char][bits]; \
+  sym_list_ptrs[first_char][bits][nsob[first_char][bits]++] = symbol; \
+  if ((nsob[first_char][bits] << (32 - bits)) > (nbob[first_char][bits] << (20 - nbob_shift[first_char]))) { \
+    if (bits >= 12 + nbob_shift[first_char]) { \
+      nbob[first_char][bits]++; \
+      sum_nbob[first_char]++; \
+      for (temp_bits = bits + 1 ; temp_bits <= max_code_length ; temp_bits++) \
+        fbob[first_char][temp_bits]++; \
+    } \
+    else { \
+      nbob[first_char][bits] += 1 << (12 + nbob_shift[first_char] - bits); \
+      sum_nbob[first_char] += 1 << (12 + nbob_shift[first_char] - bits); \
+      for (temp_bits = bits + 1 ; temp_bits <= max_code_length ; temp_bits++) \
+        fbob[first_char][temp_bits] += 1 << (12 + nbob_shift[first_char] - bits); \
+    } \
+    if (sum_nbob[first_char] > 0x1000) { \
+      do { \
+        nbob_shift[first_char]--; \
+        unsigned char code_length; \
+        sum_nbob[first_char] = 0; \
+        for (code_length = 1 ; code_length <= max_code_length ; code_length++) \
+          sum_nbob[first_char] += (nbob[first_char][code_length] = (nbob[first_char][code_length] + 1) >> 1); \
+      } while (sum_nbob[first_char] > 0x1000); \
+      unsigned short int bin = nbob[first_char][1]; \
+      for (temp_bits = 2 ; temp_bits <= max_code_length ; temp_bits++) { \
+        fbob[first_char][temp_bits] = bin; \
+        bin += nbob[first_char][temp_bits]; \
+      } \
+    } \
   } \
 }
 
 
-#define add_dictionary_symbol_cap(symbol, bits) { \
-  symbol_index = num_symbols_of_bits_cap[bits]++; \
-  symbol_array_of_bits_cap[bits][symbol_index] = symbol; \
-  symbol_array_index_cap[symbol] = symbol_index; \
-  while ((num_symbols_of_bits_cap[bits] << (32 - bits)) > (num_bins_of_bits_cap[bits] << 20)) { \
-    update_code_table_cap(bits); \
-  } \
-}
-
-
-#define remove_dictionary_symbol() { \
-  if (cap_encoded && symbol_starts_az[this_symbol]) { \
-    symbol_index = symbol_array_index_cap[this_symbol]; \
-    symbol_to_move = symbol_array_of_bits_cap[symbol_bits][--num_symbols_of_bits_cap[symbol_bits]]; \
-    symbol_array_of_bits_cap[symbol_bits][symbol_index] = symbol_to_move; \
-    symbol_array_index_cap[symbol_to_move] = symbol_index; \
-  } \
-  symbol_index = symbol_array_index[this_symbol]; \
-  symbol_to_move = symbol_array_of_bits[symbol_bits][--num_symbols_of_bits[symbol_bits]]; \
-  symbol_array_of_bits[symbol_bits][symbol_index] = symbol_to_move; \
-  symbol_array_index[symbol_to_move] = symbol_index; \
+#define remove_dictionary_symbol(symbol, bits) { \
+  unsigned char first_char = starts[symbol]; \
+  sym_list_ptrs[first_char][bits][symbol_array_index[symbol]] = sym_list_ptrs[first_char][bits][--nsob[first_char][bits]]; \
+  symbol_array_index[sym_list_ptrs[first_char][bits][nsob[first_char][bits]]] = symbol_array_index[symbol]; \
 }
 
 
@@ -1213,8 +1219,6 @@ inline void manage_mtf_queue(unsigned int this_symbol, unsigned int symbol_inst,
       else {
         EncodeDictType(LEVEL1);
       }
-      symbol_index = symbol_array_index[this_symbol];
-      encode_dictionary_symbol();
     }
     else {
       UpFreqMtfQueueNum(CAP);
@@ -1224,41 +1228,19 @@ inline void manage_mtf_queue(unsigned int this_symbol, unsigned int symbol_inst,
       else {
         EncodeDictType(LEVEL1_CAP);
       }
-      symbol_index = symbol_array_index_cap[this_symbol];
-      encode_dictionary_symbol_cap();
     }
+    encode_dictionary_symbol(this_symbol);
     // move the symbol back into the mtf queue
     symbol_bits = mtf_queue_overflow_code_length[this_symbol_count];
     if (mtf_queue_size[this_symbol_count] < MTF_QUEUE_LENGTH) {
       mtf_queue[this_symbol_count][mtf_queue_size[this_symbol_count]++] = this_symbol;
-      remove_dictionary_symbol();
+      remove_dictionary_symbol(this_symbol, symbol_bits);
     }
     else {
       symbol_is_nonergodic[mtf_queue[this_symbol_count][0]] = 0;
-      if (cap_encoded) {
-        if (symbol_starts_az[this_symbol]) {
-          symbol_index = symbol_array_index_cap[this_symbol];
-          if (symbol_starts_az[mtf_queue[this_symbol_count][0]]) {
-            // give the symbol that is falling out of the queue the index previously assigned to this symbol
-            symbol_to_move = mtf_queue[this_symbol_count][0];
-            symbol_array_of_bits_cap[symbol_bits][symbol_index] = symbol_to_move;
-            symbol_array_index_cap[symbol_to_move] = symbol_index;
-          }
-          else {
-            symbol_to_move = symbol_array_of_bits_cap[symbol_bits][--num_symbols_of_bits_cap[symbol_bits]];
-            symbol_array_of_bits_cap[symbol_bits][symbol_index] = symbol_to_move;
-            symbol_array_index_cap[symbol_to_move] = symbol_index;
-          }
-        }
-        else if (symbol_starts_az[mtf_queue[this_symbol_count][0]]) {
-          symbol_to_move = mtf_queue[this_symbol_count][0];
-          add_dictionary_symbol_cap(symbol_to_move, symbol_bits);
-        }
-      }
       symbol_to_move = mtf_queue[this_symbol_count][0];
-      symbol_index = symbol_array_index[this_symbol];
-      symbol_array_of_bits[symbol_bits][symbol_index] = symbol_to_move;
-      symbol_array_index[symbol_to_move] = symbol_index;
+      remove_dictionary_symbol(this_symbol, symbol_bits); \
+      add_dictionary_symbol(symbol_to_move,symbol_bits);
       // move the queue elements down
       while (i1 < mtf_queue_size[this_symbol_count] - 1) {
         mtf_queue[this_symbol_count][i1] = mtf_queue[this_symbol_count][i1+1];
@@ -1325,8 +1307,6 @@ inline void manage_mtf_queue(unsigned int this_symbol, unsigned int symbol_inst,
       else {
         EncodeDictType(LEVEL1);
       }
-      symbol_index = symbol_array_index[this_symbol];
-      encode_dictionary_symbol();
     }
     else {
       if (in_definition == 0) {
@@ -1335,11 +1315,10 @@ inline void manage_mtf_queue(unsigned int this_symbol, unsigned int symbol_inst,
       else {
         EncodeDictType(LEVEL1_CAP);
       }
-      symbol_index = symbol_array_index_cap[this_symbol];
-      encode_dictionary_symbol_cap();
     }
+    encode_dictionary_symbol(this_symbol);
     symbol_bits = mtf_queue_overflow_code_length[this_symbol_count];
-    remove_dictionary_symbol();
+    remove_dictionary_symbol(this_symbol, symbol_bits);
     prior_is_cap = cap_encoded & symbol_ends_cap[this_symbol];
   }
 }
@@ -1355,8 +1334,6 @@ inline void manage_mtf_symbol(unsigned int this_symbol, unsigned int symbol_inst
     else {
       EncodeDictType(LEVEL1);
     }
-    symbol_index = symbol_array_index[this_symbol];
-    encode_dictionary_symbol();
   }
   else {
     if (in_definition == 0) {
@@ -1365,13 +1342,12 @@ inline void manage_mtf_symbol(unsigned int this_symbol, unsigned int symbol_inst
     else {
       EncodeDictType(LEVEL1_CAP);
     }
-    symbol_index = symbol_array_index_cap[this_symbol];
-    encode_dictionary_symbol_cap();
   }
+  encode_dictionary_symbol(this_symbol);
   prior_is_cap = cap_encoded & symbol_ends_cap[this_symbol];
   if (symbol_inst == this_symbol_count - 1) { // last instance
     symbol_bits = mtf_queue_overflow_code_length[this_symbol_count];
-    remove_dictionary_symbol();
+    remove_dictionary_symbol(this_symbol, symbol_bits);
   }
 }
 
@@ -1514,6 +1490,7 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
     define_string_end_ptr = define_symbol_start_ptr[symbol_number+1] - 1;
     while (define_string_ptr != define_string_end_ptr) {
       this_symbol = *define_string_ptr++;
+      nexts[prior_end][starts[this_symbol]]++;
       symbol_inst = symbol_inst_found[this_symbol]++;
       define_symbol_instances = symbol_count[this_symbol];
       if (symbol_inst == 0)
@@ -1541,8 +1518,6 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
               EncodeDictType(LEVEL1);
             }
             prior_is_cap = cap_encoded & symbol_ends_cap[this_symbol];
-            symbol_index = symbol_array_index[this_symbol];
-            encode_dictionary_symbol();
           }
           else {
             if (in_definition == 0) {
@@ -1552,14 +1527,14 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
               EncodeDictType(LEVEL1_CAP);
             }
             prior_is_cap = symbol_ends_cap[this_symbol];
-            symbol_index = symbol_array_index_cap[this_symbol];
-            encode_dictionary_symbol_cap();
           }
+          encode_dictionary_symbol(this_symbol);
           if (symbol_is_nonergodic[this_symbol]) {
             add_symbol_to_mtfg_queue(this_symbol);
           }
         }
       }
+      prior_end = ends[this_symbol];
     }
     return;
   }
@@ -1590,7 +1565,7 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
       new_symbol_code_length = (unsigned int)symbol_lengths[define_symbol];
   }
 
-  // get the code for the new symbol frequency and length
+  // send symbol length, instances and ergodicity bit
   if (define_symbol < START_MY_SYMBOLS) {
     SIDSymbol = 0;
     if (define_symbol_instances == 1)
@@ -1613,8 +1588,97 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
     }
     BaseSymbol = define_symbol;
     EncodeBaseSymbol(base_bits);
+    if (UTF8_compliant) {
+      if (BaseSymbol < 0x80) {
+        unsigned char j1;
+        j1 = 0x80;
+        do {
+          if (RangeScaleFirstChar[j1]) {
+            unsigned char j2 = 0x80;
+            while (SymbolFirstChar[j1][j2] != BaseSymbol)
+              j2--;
+            FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(j1);
+          }
+        } while (j1--);
+        j1 = 0x80;
+        do {
+          SymbolFirstChar[BaseSymbol][j1] = j1;
+          if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          }
+        } while (j1--);
+      }
+      else if (RangeScaleFirstChar[0x80] == 0) {
+        unsigned char j1 = 0x7F;
+        do {
+          if (RangeScaleFirstChar[j1]) {
+            FreqFirstChar[j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(j1);
+          }
+        } while (j1--);
+        j1 = 0x80;
+        do {
+          SymbolFirstChar[0x80][j1] = j1;
+          if (RangeScaleFirstChar[j1]) {
+            FreqFirstChar[0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0x80] += UP_FREQ_FIRST_CHAR;
+          }
+        } while (j1--);
+        FreqFirstChar[0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[0x80] += UP_FREQ_FIRST_CHAR;
+      }
+      prior_end = BaseSymbol;
+      if (prior_end > 0x80)
+        prior_end = 0x80;
+    }
+    else {
+      unsigned char j1 = 0xFF;
+      do {
+        if (RangeScaleFirstChar[j1]) {
+          unsigned char j2 = 0xFF;
+          while (SymbolFirstChar[j1][j2] != BaseSymbol)
+          j2--;
+          FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
+          if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
+            rescaleFirstChar(j1);
+        }
+      } while (j1--);
+      j1 = 0xFF;
+      do {
+        SymbolFirstChar[BaseSymbol][j1] = j1;
+        if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
+          FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+        }
+      } while (j1--);
+      prior_end = BaseSymbol;
+    }
+
     char_before_define_is_cap = prior_is_cap;
     prior_is_cap = cap_encoded & symbol_ends_cap[define_symbol];
+    if (found_first_symbol == 0) {
+      found_first_symbol = 1;
+      end_symbol = prior_end;
+      sym_list_ptrs[end_symbol][max_code_length][0] = MAX_SYMBOLS_DEFINED - 1;
+      nsob[end_symbol][max_code_length] = 1;
+      nbob[end_symbol][max_code_length] = 1;
+      if (max_code_length >= 12) {
+        nbob_shift[end_symbol] = max_code_length - 12;
+        nbob[end_symbol][max_code_length] = 1;
+        sum_nbob[end_symbol] = 1;
+      }
+      else {
+        nbob[end_symbol][max_code_length] = 1 << (12 - max_code_length);
+        sum_nbob[end_symbol] = 1 << (12 - max_code_length);
+      }
+    }
   }
   else {
     symbol_number = define_symbol - START_MY_SYMBOLS;
@@ -1695,6 +1759,7 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
     define_string_ptr = this_define_symbol_start_ptr;
     while (define_string_ptr != define_string_end_ptr) {
       this_symbol = *define_string_ptr++;
+      nexts[prior_end][starts[this_symbol]]++;
       symbol_inst = symbol_inst_found[this_symbol]++;
       this_symbol_count = symbol_count[this_symbol];
       if (symbol_inst == 0)
@@ -1717,20 +1782,18 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
           if (prior_is_cap == 0) {
             EncodeDictType(LEVEL1);
             prior_is_cap = cap_encoded & symbol_ends_cap[this_symbol];
-            symbol_index = symbol_array_index[this_symbol];
-            encode_dictionary_symbol();
           }
           else {
             EncodeDictType(LEVEL1_CAP);
             prior_is_cap = symbol_ends_cap[this_symbol];
-            symbol_index = symbol_array_index_cap[this_symbol];
-            encode_dictionary_symbol_cap();
           }
+          encode_dictionary_symbol(this_symbol);
           if (symbol_is_nonergodic[this_symbol]) {
             add_symbol_to_mtfg_queue(this_symbol);
           }
         }
       }
+      prior_end = ends[this_symbol];
     }
   }
 
@@ -1750,12 +1813,8 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
           mtf_queue[define_symbol_instances][mtf_queue_size[define_symbol_instances]++] = define_symbol;
         }
         else {
-          if (cap_encoded && symbol_starts_az[mtf_queue[define_symbol_instances][0]]) {
-            symbol_to_move = mtf_queue[define_symbol_instances][0];
-            symbol_is_nonergodic[symbol_to_move] = 0;
-            add_dictionary_symbol_cap(symbol_to_move, new_symbol_code_length);
-          }
           symbol_to_move = mtf_queue[define_symbol_instances][0];
+          symbol_is_nonergodic[symbol_to_move] = 0;
           add_dictionary_symbol(symbol_to_move, new_symbol_code_length);
           for (i1=0 ; i1<63 ; i1++)
             mtf_queue[define_symbol_instances][i1] = mtf_queue[define_symbol_instances][i1+1];
@@ -1763,11 +1822,7 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
         }
       }
       else {
-        // Handle initial mtf symbol instance
         add_dictionary_symbol(define_symbol, new_symbol_code_length);
-        if (cap_encoded && symbol_starts_az[define_symbol]) {
-          add_dictionary_symbol_cap(define_symbol, new_symbol_code_length);
-        }
       }
     }
     else {
@@ -1775,9 +1830,6 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
         add_symbol_to_mtfg_queue(define_symbol);
       }
       add_dictionary_symbol(define_symbol, new_symbol_code_length);
-      if (cap_encoded && symbol_starts_az[define_symbol]) {
-        add_dictionary_symbol_cap(define_symbol, new_symbol_code_length);
-      }
     }
   }
   num_define_symbols_written++;
@@ -1787,7 +1839,7 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
 int main(int argc, char* argv[]) {
   FILE *fd_in, *fd_out;
 
-  unsigned char this_char, arg_num, verbose;
+  unsigned char this_char, arg_num, verbose, delta_gap;
   unsigned char *string_ptr, *string_end_ptr;
   unsigned int i1, i2, in_size, num_symbols, num_symbols_defined, num_definitions_to_code, num_chars_to_read;
   unsigned int UTF8_value, max_UTF8_value, this_symbol, this_symbol_count, symbol_inst, end_symbols, next_symbol;
@@ -1843,7 +1895,8 @@ int main(int argc, char* argv[]) {
   fread(in_data,1,READ_SIZE+3,fd_in);
   num_chars_to_read = in_size - READ_SIZE - 3;
 
-  cap_encoded = *in_char_ptr++; 
+  cap_encoded = *in_char_ptr & 1; 
+  delta_gap = *in_char_ptr++ >> 1;
   UTF8_compliant = 1;
   max_UTF8_value = 0x7F;
 
@@ -2057,7 +2110,6 @@ int main(int argc, char* argv[]) {
   end_symbol_ptr = symbol_ptr;
   num_symbols = end_symbol_ptr - symbol;
   end_symbols = START_MY_SYMBOLS + num_symbols_defined;
-
   fprintf(stderr,"Read %u symbols including %u definition symbols\n",num_symbols,num_symbols_defined);
 
   // count the number of instances of each symbol
@@ -2204,6 +2256,27 @@ int main(int argc, char* argv[]) {
     symbol_is_nonergodic[i1] = 0;
   }
 
+  mtfg_queue_8_offset = 0;
+  mtfg_queue_16_offset = 0;
+  mtfg_queue_32_offset = 0;
+  mtfg_queue_64_offset = 0;
+  mtfg_queue_128_offset = 0;
+  mtfg_queue_192_offset = 0;
+  for (i1 = 0 ; i1 < 8 ; i1++)
+    mtfg_queue_0[i1] = MAX_SYMBOLS_DEFINED - 1;
+  for (i1 = 0 ; i1 < 8 ; i1++)
+    mtfg_queue_8[i1] = MAX_SYMBOLS_DEFINED - 1;
+  for (i1 = 0 ; i1 < 16 ; i1++)
+    mtfg_queue_16[i1] = MAX_SYMBOLS_DEFINED - 1;
+  for (i1 = 0 ; i1 < 32 ; i1++)
+    mtfg_queue_32[i1] = MAX_SYMBOLS_DEFINED - 1;
+  for (i1 = 0 ; i1 < 64 ; i1++)
+    mtfg_queue_64[i1] = MAX_SYMBOLS_DEFINED - 1;
+  for (i1 = 0 ; i1 < 64 ; i1++)
+    mtfg_queue_128[i1] = MAX_SYMBOLS_DEFINED - 1;
+  for (i1 = 0 ; i1 < 64 ; i1++)
+    mtfg_queue_192[i1] = MAX_SYMBOLS_DEFINED - 1;
+
   symbol_ptr = symbol;
   while (symbol_ptr < first_define_ptr) {
     if (((symbol_ptr - symbol) & 0x3FFFFF) == 0)
@@ -2231,11 +2304,11 @@ int main(int argc, char* argv[]) {
   }
   fprintf(stderr,"Parsed %u level 0 symbols              \r",first_define_ptr-symbol);
 
+  mtfg_symbols_reduced = 0;
   use_mtf = 0;
   if ((mtf_queue_peak[2] >= 0x80) && (log(num_symbols) + (double)(4 * mtf_queue_started[2]) / (double)mtf_queue_peak[2] >= 22.0))
   {
     use_mtf = 1;
-    mtfg_symbols_reduced = 0;
     for (i1 = 0 ; i1 < end_symbols ; i1++) {
       if ((symbol_count[i1] > 20) && (symbol_lengths[i1] >= 11) && (mtfg_hits2[i1] > ((symbol_count[i1] * 9) >> 4))) {
         symbol_is_nonergodic[i1] = 1;
@@ -2292,19 +2365,19 @@ int main(int argc, char* argv[]) {
   mtfg_queue_128_offset = 0;
   mtfg_queue_192_offset = 0;
   for (i1 = 0 ; i1 < 8 ; i1++)
-    mtfg_queue_0[i1] = 0xFFFFFFFF;
+    mtfg_queue_0[i1] = MAX_SYMBOLS_DEFINED - 1;
   for (i1 = 0 ; i1 < 8 ; i1++)
-    mtfg_queue_8[i1] = 0xFFFFFFFF;
+    mtfg_queue_8[i1] = MAX_SYMBOLS_DEFINED - 1;
   for (i1 = 0 ; i1 < 16 ; i1++)
-    mtfg_queue_16[i1] = 0xFFFFFFFF;
+    mtfg_queue_16[i1] = MAX_SYMBOLS_DEFINED - 1;
   for (i1 = 0 ; i1 < 32 ; i1++)
-    mtfg_queue_32[i1] = 0xFFFFFFFF;
+    mtfg_queue_32[i1] = MAX_SYMBOLS_DEFINED - 1;
   for (i1 = 0 ; i1 < 64 ; i1++)
-    mtfg_queue_64[i1] = 0xFFFFFFFF;
+    mtfg_queue_64[i1] = MAX_SYMBOLS_DEFINED - 1;
   for (i1 = 0 ; i1 < 64 ; i1++)
-    mtfg_queue_128[i1] = 0xFFFFFFFF;
+    mtfg_queue_128[i1] = MAX_SYMBOLS_DEFINED - 1;
   for (i1 = 0 ; i1 < 64 ; i1++)
-    mtfg_queue_192[i1] = 0xFFFFFFFF;
+    mtfg_queue_192[i1] = MAX_SYMBOLS_DEFINED - 1;
 
   for (i1=2 ; i1 <= MAX_INSTANCES_FOR_MTF_QUEUE ; i1++) { /* PUT i1=2 OUTSIDE OF LOOP */
     mtf_queue_hits = 0;
@@ -2368,21 +2441,6 @@ int main(int argc, char* argv[]) {
     }
   }
   max_code_length = mtf_queue_overflow_code_length[2];
-
-  for (i1 = 0 ; i1 < 8 ; i1++)
-    mtfg_queue_0[i1] = 0xFFFFFFFF;
-  for (i1 = 0 ; i1 < 8 ; i1++)
-    mtfg_queue_8[i1] = 0xFFFFFFFF;
-  for (i1 = 0 ; i1 < 16 ; i1++)
-    mtfg_queue_16[i1] = 0xFFFFFFFF;
-  for (i1 = 0 ; i1 < 32 ; i1++)
-    mtfg_queue_32[i1] = 0xFFFFFFFF;
-  for (i1 = 0 ; i1 < 64 ; i1++)
-    mtfg_queue_64[i1] = 0xFFFFFFFF;
-  for (i1 = 0 ; i1 < 64 ; i1++)
-    mtfg_queue_128[i1] = 0xFFFFFFFF;
-  for (i1 = 0 ; i1 < 64 ; i1++)
-    mtfg_queue_192[i1] = 0xFFFFFFFF;
 
   if (use_mtf) {
     mtf_queue_miss_code_space = 0;
@@ -2453,44 +2511,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  i1 = max_code_length;
-  num_symbols_of_bits[i1] = 1;
-  symbol_array_of_bits[i1][0] = 0x9FFFFF;
-  symbol_is_nonergodic[0x9FFFFF] = 0;
-  if (i1 >= 12) {
-    num_bins_of_bits[i1] = 1;
-    dictionary_bins = 1;
-  }
-  else {
-    num_bins_of_bits[i1] = 1 << (12 - max_code_length);
-    dictionary_bins = 1 << (12 - max_code_length);
-  }
-  first_bin_of_bits[i1--] = 0;
-  while (i1 != 0) {
-    num_symbols_of_bits[i1] = 0;
-    num_bins_of_bits[i1] = 0;
-    first_bin_of_bits[i1--] = 0;
-  }
-
-  if (cap_encoded) {
-    i1 = max_code_length;
-    num_symbols_of_bits_cap[i1] = 1;
-    symbol_array_of_bits_cap[i1][0] = 0x9FFFFF;
-    if (max_code_length >= 12) {
-      num_bins_of_bits_cap[i1] = 1;
-      dictionary_bins_cap = 1;
-    }
-    else {
-      num_bins_of_bits_cap[i1] = 1 << (12 - max_code_length);
-      dictionary_bins_cap = 1 << (12 - max_code_length);
-    }
-    first_bin_of_bits_cap[i1--] = 0;
-    while (i1 != 0) {
-      num_symbols_of_bits_cap[i1] = 0;
-      num_bins_of_bits_cap[i1] = 0;
-      first_bin_of_bits_cap[i1--] = 0;
-    }
-  }
+  symbol_is_nonergodic[MAX_SYMBOLS_DEFINED - 1] = 0;
 
   if((fd_out = fopen(argv[arg_num],"wb")) == NULL) {
     printf("fopen error - %s\n",argv[arg_num]);
@@ -2504,7 +2525,10 @@ int main(int argc, char* argv[]) {
 
   InitEncoder(fd_out);
   OutData[OutCharNum++] = (cap_encoded << 7) | (UTF8_compliant << 6) | (use_mtf << 5) | base_bits;
-  OutData[OutCharNum++] = mtf_queue_overflow_code_length[2] - 1;
+  if (delta_gap < 4)
+    OutData[OutCharNum++] = mtf_queue_overflow_code_length[2] - 1 + (delta_gap << 5);
+  else
+    OutData[OutCharNum++] = mtf_queue_overflow_code_length[2] - 1 + (3 << 5);
   OutData[OutCharNum++] = ((mtf_queue_overflow_code_length[3] != mtf_queue_overflow_code_length[2]) << 7)
       | ((mtf_queue_overflow_code_length[4] != mtf_queue_overflow_code_length[3]) << 6)
       | (max_regular_code_length - 1);
@@ -2515,10 +2539,53 @@ int main(int argc, char* argv[]) {
     this_char = (this_char << 1) | (mtf_queue_overflow_code_length[i1 + 13] != mtf_queue_overflow_code_length[i1 + 12]);
   OutData[OutCharNum++] = this_char;
 
+  if (UTF8_compliant) {
+    for (i1 = 0 ; i1 < end_symbols ; i1++) {
+      find_first_UTF8(i1);
+      find_last_UTF8(i1);
+    }
+    for (i1 = 0 ; i1 < 0x81 ; i1++) {
+      for (i2 = 0 ; i2 < 0x81 ; i2++)
+        nexts[i1][i2] = 0;
+    }
+    for (i1 = 0 ; i1 < 0x81 ; i1++) {
+      for (i2 = 1 ; i2 <= max_code_length ; i2++) {
+        sym_list_ptrs[i1][i2] = (unsigned int *)malloc(sizeof(unsigned int) * INITIAL_LIST_SIZE);
+        nsob[i1][i2] = 0;
+        nbob[i1][i2] = 0;
+        fbob[i1][i2] = 0;
+        over[i1][i2] = 0;
+      }
+      nbob_shift[i1] = max_code_length - 12;
+      sum_nbob[i1] = 0;
+    }
+  }
+  else {
+    for (i1 = 0 ; i1 < end_symbols ; i1++) {
+      find_first(i1);
+      find_last(i1);
+    }
+    for (i1 = 0 ; i1 < 0x100 ; i1++) {
+      for (i2 = 0 ; i2 < 0x100 ; i2++)
+        nexts[i1][i2] = 0;
+    }
+    for (i1 = 0 ; i1 < 0x100 ; i1++) {
+      for (i2 = 1 ; i2 <= max_code_length ; i2++) {
+        sym_list_ptrs[i1][i2] = (unsigned int *)malloc(sizeof(unsigned int) * INITIAL_LIST_SIZE);
+        nsob[i1][i2] = 0;
+        nbob[i1][i2] = 0;
+        fbob[i1][i2] = 0;
+        over[i1][i2] = 0;
+      }
+      nbob_shift[i1] = max_code_length - 12;
+      sum_nbob[i1] = 0;
+    }
+  }
+  found_first_symbol = 0;
+
   while (symbol_ptr < first_define_ptr) {
-    if (((symbol_ptr-symbol)&0x1FFFFF) == 0)
-      fprintf(stderr,"Encoded %u of %u level 1 symbols\r",symbol_ptr-symbol,first_define_ptr-symbol);
     this_symbol = *symbol_ptr++;
+    nexts[prior_end][starts[this_symbol]]++;
     this_symbol_count = symbol_count[this_symbol];
     symbol_inst = symbol_inst_found[this_symbol]++;
     if (symbol_inst == 0) {
@@ -2542,50 +2609,49 @@ int main(int argc, char* argv[]) {
         if (prior_is_cap == 0) {
           EncodeDictType(LEVEL0);
           prior_is_cap = cap_encoded & symbol_ends_cap[this_symbol];
-          symbol_index = symbol_array_index[this_symbol];
-          encode_dictionary_symbol();
         }
         else {
           EncodeDictType(LEVEL0_CAP);
           prior_is_cap = symbol_ends_cap[this_symbol];
-          symbol_index = symbol_array_index_cap[this_symbol];
-          encode_dictionary_symbol_cap();
         }
+        encode_dictionary_symbol(this_symbol);
         if (symbol_is_nonergodic[this_symbol])
           add_symbol_to_mtfg_queue(this_symbol);
       }
     }
+    prior_end = ends[this_symbol];
+    if (((symbol_ptr-symbol)&0x1FFFFF) == 0)
+      fprintf(stderr,"Encoded %u of %u level 1 symbols\r",symbol_ptr-symbol,first_define_ptr-symbol);
   }
 
   // send EOF and flush output
-  CodeLength = max_code_length;
+  Symbol = end_symbol;
+  CodeLength = max_code_length - nbob_shift[Symbol];
+  DictionaryBins = sum_nbob[Symbol];
+  BinNum = fbob[Symbol][max_code_length];
   if (prior_is_cap == 0) {
     EncodeDictType(LEVEL0);
-    BinNum = first_bin_of_bits[max_code_length];
-    DictionaryBins = dictionary_bins;
-    if (max_code_length > 12) {
-      BinCode = 0;
-      EncodeLongDictionarySymbol(1);
-    }
-    else {
-      EncodeShortDictionarySymbol(max_code_length, 1);
-    }
   }
   else {
     EncodeDictType(LEVEL0_CAP);
-    DictionaryBins = dictionary_bins_cap;
-    BinNum = first_bin_of_bits_cap[max_code_length];
-    if (max_code_length > 12) {
-      BinCode = 0;
-      EncodeLongDictionarySymbol(1);
-    }
-    else {
-      EncodeShortDictionarySymbol(max_code_length, 1);
-    }
+  }
+  EncodeFirstChar(prior_end);
+  if (max_code_length - nbob_shift[Symbol] > 12) {
+    BinCode = 0;
+    EncodeLongDictionarySymbol(1);
+  }
+  else {
+    EncodeShortDictionarySymbol(CodeLength, 1);
   }
   FinishEncoder();
   fprintf(stderr,"Encoded %u level 1 symbols             \n",symbol_ptr-symbol,first_define_ptr-symbol);
   fprintf(stderr,"Compressed file size: %u bytes, dictionary size: %u symbols\n",ftell(fd_out),num_define_symbols_written);
   fclose(fd_out);
+  i1 = 0x100;
+  if (UTF8_compliant)
+    i1 = 0x81;
+  while (i1--)
+    for (i2 = 1 ; i2 <= max_code_length ; i2++)
+      free(sym_list_ptrs[i1][i2]);
   fprintf(stderr,"elapsed time = %f seconds.\n", 0.001*(float)(clock()-start_time));
 }
