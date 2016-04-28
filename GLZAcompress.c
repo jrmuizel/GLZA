@@ -1217,7 +1217,7 @@ substitute_new_token:
         while (substitute_data[substitute_data_index] == 0);
         unsigned int symbol = substitute_data[substitute_data_index];
         token_count[symbol]++;
-        *out_token_ptr++ = symbol; 
+        *out_token_ptr++ = symbol;
         substitute_data[substitute_data_index++] = 0;
         data = substitute_data[substitute_data_index];
         if ((int)data > 0)
@@ -2396,25 +2396,42 @@ main_overlap_check_loop_end:
 
       fprintf(stderr,"Replacing data with new dictionary symbols\r");
       // scan the data following the prefix tree and substitute new tokens on end matches (child is 0)
-      stop_token_ptr = start_token_ptr + ((end_token_ptr - start_token_ptr) >> 3);
-      find_substitutions_data[0].start_token_ptr = stop_token_ptr;
-      block_size = (end_token_ptr - start_token_ptr) / 7;
-      block_ptr = stop_token_ptr + block_size;
-      find_substitutions_data[0].stop_token_ptr = block_ptr;
-      find_substitutions_data[1].start_token_ptr = block_ptr;
-      block_ptr += block_size;
-      find_substitutions_data[1].stop_token_ptr = block_ptr;
-      find_substitutions_data[2].start_token_ptr = block_ptr;
-      block_ptr += block_size;
-      find_substitutions_data[2].stop_token_ptr = block_ptr;
-      find_substitutions_data[3].start_token_ptr = block_ptr;
-      block_ptr += block_size;
-      find_substitutions_data[3].stop_token_ptr = block_ptr;
-      find_substitutions_data[4].start_token_ptr = block_ptr;
-      block_ptr += block_size;
-      find_substitutions_data[4].stop_token_ptr = block_ptr;
-      find_substitutions_data[5].start_token_ptr = block_ptr;
-      find_substitutions_data[5].stop_token_ptr = end_token_ptr;
+      if (end_token_ptr - start_token_ptr >= 1000000) {
+        stop_token_ptr = start_token_ptr + ((end_token_ptr - start_token_ptr) >> 3);
+        find_substitutions_data[0].start_token_ptr = stop_token_ptr;
+        block_size = (end_token_ptr - start_token_ptr) / 7;
+        block_ptr = stop_token_ptr + block_size;
+        find_substitutions_data[0].stop_token_ptr = block_ptr;
+        find_substitutions_data[1].start_token_ptr = block_ptr;
+        block_ptr += block_size;
+        find_substitutions_data[1].stop_token_ptr = block_ptr;
+        find_substitutions_data[2].start_token_ptr = block_ptr;
+        block_ptr += block_size;
+        find_substitutions_data[2].stop_token_ptr = block_ptr;
+        find_substitutions_data[3].start_token_ptr = block_ptr;
+        block_ptr += block_size;
+        find_substitutions_data[3].stop_token_ptr = block_ptr;
+        find_substitutions_data[4].start_token_ptr = block_ptr;
+        block_ptr += block_size;
+        find_substitutions_data[4].stop_token_ptr = block_ptr;
+        find_substitutions_data[5].start_token_ptr = block_ptr;
+        find_substitutions_data[5].stop_token_ptr = end_token_ptr;
+      }
+      else {
+        stop_token_ptr = end_token_ptr;
+        find_substitutions_data[0].start_token_ptr = end_token_ptr;
+        find_substitutions_data[0].stop_token_ptr = end_token_ptr;
+        find_substitutions_data[1].start_token_ptr = end_token_ptr;
+        find_substitutions_data[1].stop_token_ptr = end_token_ptr;
+        find_substitutions_data[2].start_token_ptr = end_token_ptr;
+        find_substitutions_data[2].stop_token_ptr = end_token_ptr;
+        find_substitutions_data[3].start_token_ptr = end_token_ptr;
+        find_substitutions_data[3].stop_token_ptr = end_token_ptr;
+        find_substitutions_data[4].start_token_ptr = end_token_ptr;
+        find_substitutions_data[4].stop_token_ptr = end_token_ptr;
+        find_substitutions_data[5].start_token_ptr = end_token_ptr;
+        find_substitutions_data[5].stop_token_ptr = end_token_ptr;
+      }
 
       for (i1 = 0 ; i1 < 6 ; i1++) {
         find_substitutions_data[i1].done = 0;
@@ -2611,6 +2628,7 @@ main_token_substitution_loop_end:
       for (i1 = 0 ; i1 < 6 ; i1++) {
         unsigned int num_substitutions;
         unsigned int i2 = 0;
+top_sub:
         while (find_substitutions_data[i1].done == 0) {
           num_substitutions = find_substitutions_data[i1].num_substitutions;
           if (extra_match_symbols && num_substitutions) {
@@ -2624,22 +2642,22 @@ main_token_substitution_loop_end:
                 extra_match_symbols = 0;
               }
               else {
-                find_substitutions_data[i1].data[1] = find_substitutions_data[i1].data[0]
-                    + find_substitutions_data[i1].data[1] - extra_match_symbols;
-                extra_match_symbols -= find_substitutions_data[i1].data[0];
-                if (num_substitutions == 1)
-                  i2 = 1;
-                else {
-                  i2 = 2;
-                  find_substitutions_data[i1].data[2] = find_substitutions_data[i1].data[1] - 0x80000000 - extra_match_symbols;
-                  extra_match_symbols = 0;
-                }
+                find_substitutions_data[i1].done = 0;
+                find_substitutions_data[i1].num_substitutions = 0;
+                find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+                pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,
+                    (char *)&find_substitutions_data[i1]);
+                extra_match_symbols = 0;
+                goto top_sub;
               }
             }
             else {
-              find_substitutions_data[i1].data[1] = find_substitutions_data[i1].data[0] - 0x80000000 - extra_match_symbols;
-              i2 = 1;
+              find_substitutions_data[i1].done = 0;
+              find_substitutions_data[i1].num_substitutions = 0;
+              find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+              pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,(char *)&find_substitutions_data[i1]);
               extra_match_symbols = 0;
+              goto top_sub;
             }
           }
           while (i2 != num_substitutions) { // send find_substitutions thread data
@@ -2663,22 +2681,21 @@ main_token_substitution_loop_end:
               extra_match_symbols = 0;
             }
             else {
-              find_substitutions_data[i1].data[1] = find_substitutions_data[i1].data[0]
-                  + find_substitutions_data[i1].data[1] - extra_match_symbols;
-              extra_match_symbols -= find_substitutions_data[i1].data[0];
-              if (num_substitutions == 1)
-                i2 = 1;
-              else {
-                i2 = 2;
-                find_substitutions_data[i1].data[2] = find_substitutions_data[i1].data[1] - 0x80000000 - extra_match_symbols;
-                extra_match_symbols = 0;
-              }
+              find_substitutions_data[i1].done = 0;
+              find_substitutions_data[i1].num_substitutions = 0;
+              find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+              pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,(char *)&find_substitutions_data[i1]);
+              extra_match_symbols = 0;
+              goto top_sub;
             }
           }
           else {
-            find_substitutions_data[i1].data[1] = find_substitutions_data[i1].data[0] - 0x80000000 - extra_match_symbols;
-            i2 = 1;
+            find_substitutions_data[i1].done = 0;
+            find_substitutions_data[i1].num_substitutions = 0;
+            find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+            pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,(char *)&find_substitutions_data[i1]);
             extra_match_symbols = 0;
+            goto top_sub;
           }
         }
         while (i2 != num_substitutions) { // send find_substitutions thread data
