@@ -511,10 +511,10 @@ struct sym_data {
               } while (cap_queue_position != mtfg_queue_128_offset); \
               if (find_caps) { \
                 cap_queue_position = mtfg_queue_192_offset; \
-                while (symbol_data[*(mtfg_queue_192 + cap_queue_position)].type & 2) { \
+                while ((symbol_data[*(mtfg_queue_192 + cap_queue_position)].type & 2) == 0) { \
                   mtfg_queue_position++; \
                   cap_queue_position = (cap_queue_position + 1) & 0x3F; \
-                } while (1); \
+                } \
               } \
             } \
           } \
