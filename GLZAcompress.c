@@ -118,7 +118,7 @@ unsigned int * volatile stop_token_ptr;
 volatile unsigned int substitute_data[0x10000];
 unsigned short int node_ptrs_num, num_node_scores, node_scores_index[30000];
 double d_num_token_inv, min_score, cutoff_score;
-double log_match_ratios[2000], log_instances[10000], d_num_tokens_in_string_inv[10000];
+double log_match_ratios[2000], log_instances[10000], d_num_tokens_in_string_inv_pow5[10000];
 double *log_token_count_minus_log_num_tokens;
 unsigned char node_scores_bad[30000];
 unsigned char *char_buffer, *in_char_ptr, *out_char_ptr, *end_char_ptr;
@@ -661,15 +661,15 @@ void *rank_scores_thread_UTF8_compliant(void *arg)
       if (d_score >= min_score) {
         node_last_match_ptr = start_token_ptr + node_ptr->last_match_index;
         if ((node_ptr->token == (unsigned int)' ') && (*(node_last_match_ptr-1) != (unsigned int)' ')) {
-          d_score *= 0.0625;
+          d_score *= 0.01;
           if (d_score < min_score)
             goto rank_scores_thread_UTF8_compliant_node_done;
         }
         else {
           if (node_ptr->token == 'C')
-            d_score *= 1.3;
+            d_score *= 1.7;
           if (*(node_last_match_ptr - rank_scores_buffer[node_ptrs_num].node_num_tokens) == (unsigned int)'C')
-            d_score *= 1.3;
+            d_score *= 1.7;
         }
         score = (float)d_score;
         // find the position in the score list this node would go in
@@ -875,8 +875,9 @@ top_score_loop:
           double delta_match_ratio = log_match_ratios[2] - log_expected_match_ratio;
           double d_score = delta_match_ratio - cutoff_score;
           if (d_score >= 0.0) {
-            d_score *= pow((delta_match_ratio - 0.9) * d_num_tokens_in_string_inv[num_tokens_in_string],1.7)
-                * (delta_match_ratio + 0.4) * d_num_tokens_in_string_inv[num_tokens_in_string];
+double delta_margin = delta_match_ratio - 1.4;
+d_score *= delta_match_ratio;
+d_score *= d_score * delta_margin * delta_margin * delta_margin * d_num_tokens_in_string_inv_pow5[num_tokens_in_string];
             if (d_score >= min_score) {
               if ((node_ptrs_num & 0xFFF) == 0)
                 while (rank_scores_buffer[(unsigned short int)(node_ptrs_num + 0x1000)].node_ptrs != 0);
@@ -887,18 +888,20 @@ top_score_loop:
           }
         }
         else {
-          double delta_match_ratio, d_score;
+          double delta_match_ratio;
           double d_node_instances_m_1 = (double)(node_instances - 1);
           if (node_instances < NUM_PRECALCULATED_MATCH_RATIO_LOGS)
             delta_match_ratio = log_match_ratios[node_instances] - log_expected_match_ratio;
           else
-            delta_match_ratio = log(d_node_instances_m_1 * d_num_token_inv) - log_expected_match_ratio;
-          if (delta_match_ratio > 0.9) {
-            d_score = d_node_instances_m_1 * delta_match_ratio;
+            delta_match_ratio = log2(d_node_instances_m_1 * d_num_token_inv) - log_expected_match_ratio;
+//          if (delta_match_ratio > 1.35) {
+          if (delta_match_ratio >= 1.4) {
+double delta_margin = delta_match_ratio - 1.4;
+            double d_score = d_node_instances_m_1 * delta_match_ratio;
             if (d_score > cutoff_score) {
               d_score -= cutoff_score;
-              d_score *= pow((delta_match_ratio - 0.9) * d_num_tokens_in_string_inv[num_tokens_in_string],1.7)
-                  * (delta_match_ratio + 0.4) * d_num_tokens_in_string_inv[num_tokens_in_string];
+d_score *= delta_match_ratio;
+d_score *= d_score * delta_margin * delta_margin * delta_margin * d_num_tokens_in_string_inv_pow5[num_tokens_in_string];
               if (d_score >= min_score) {
                 if ((node_ptrs_num & 0xFFF) == 0)
                   while (rank_scores_buffer[(unsigned short int)(node_ptrs_num + 0x1000)].node_ptrs != 0);
@@ -1464,8 +1467,8 @@ int main(int argc, char* argv[])
   unsigned char UTF8_compliant, cap_encoded, user_set_RAM_size, this_char, delta_gap;
   unsigned char *free_RAM_ptr, *write_ptr;
   unsigned char out_char, out_file_name[50];
-  double d_num_token, prior_min_score, new_min_score, order_0_entropy, d_token_count, this_log_token_count_minus_log_num_token;
-  double log_num_token, log2_inv, RAM_usage;
+  double d_num_token, prior_min_score, new_min_score, order_0_entropy, d_token_count, this_log_token_count_minus_log_num_tokens;
+  double log_num_tokens, log2_inv, RAM_usage;
   float prior_cycle_start_ratio, prior_cycle_end_ratio, estimated_nodes_per_token;
   struct string_node *string_node_ptr;
 
@@ -1477,8 +1480,10 @@ int main(int argc, char* argv[])
   unsigned long long start_time = (unsigned long long)clock();
 
   log2_inv = 1.0/log(2.0);
-  for (i1 = 0 ; i1 < MAX_STRING_LENGTH ; i1++)
-    d_num_tokens_in_string_inv[i1] = 1.0 / (double)i1;
+  for (i1 = 0 ; i1 < MAX_STRING_LENGTH ; i1++) {
+    double d_temp = 1.0 / (double)i1;
+    d_num_tokens_in_string_inv_pow5[i1] = d_temp * d_temp * d_temp * d_temp * d_temp;
+  }
 
   for (i1 = 0 ; i1 < MAX_SCORES ; i1++)
     node_scores_bad[i1] = 0;
@@ -1486,7 +1491,7 @@ int main(int argc, char* argv[])
   for (i1 = 0 ; i1 < 0x10000 ; i1++)
     substitute_data[i1] = 0;
 
-  cutoff_score = 4.5;
+  cutoff_score = 7.0;
   RAM_usage = 6.5;
   user_set_RAM_size = 0;
   arg_num = 1;
@@ -1706,7 +1711,7 @@ int main(int argc, char* argv[])
 
   log_instances[1] = 0.0;
   for (i1=2 ; i1<NUM_PRECALCULATED_INSTANCE_LOGS ; i1++)
-    log_instances[i1] = log((double)i1);
+    log_instances[i1] = log2((double)i1);
 
   i1 = 0x10000;
   while (i1--)
@@ -1737,24 +1742,24 @@ int main(int argc, char* argv[])
     d_num_token = (double)num_in_tokens;
     d_num_token_inv = 1.0 / d_num_token;
     for (i1=2 ; i1<NUM_PRECALCULATED_MATCH_RATIO_LOGS ; i1++)
-      log_match_ratios[i1] = log((double)(i1-1) * d_num_token_inv);  // offset by 1 because the first instance is not a match
+      log_match_ratios[i1] = log2((double)(i1-1) * d_num_token_inv);  // offset by 1 because the first instance is not a match
 
     order_0_entropy = 0.0;
-    log_num_token = log(d_num_token);
+    log_num_tokens = log2(d_num_token);
     i1 = 0;
 
     do {
       if (token_count[i1] != 0) {
         if (token_count[i1] < NUM_PRECALCULATED_INSTANCE_LOGS) {
-          this_log_token_count_minus_log_num_token = log_instances[token_count[i1]] - log_num_token;
-          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_token;
-          order_0_entropy -= (double)token_count[i1] * this_log_token_count_minus_log_num_token;
+          this_log_token_count_minus_log_num_tokens = log_instances[token_count[i1]] - log_num_tokens;
+          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_tokens;
+          order_0_entropy -= (double)token_count[i1] * this_log_token_count_minus_log_num_tokens;
         }
         else {
           d_token_count = (double)token_count[i1];
-          this_log_token_count_minus_log_num_token = log(d_token_count) - log_num_token;
-          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_token;
-          order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_token;
+          this_log_token_count_minus_log_num_tokens = log2(d_token_count) - log_num_tokens;
+          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_tokens;
+          order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_tokens;
         }
       }
     } while (++i1 < num_base_tokens);
@@ -1762,22 +1767,22 @@ int main(int argc, char* argv[])
     if (num_tokens_defined != 0) {
       while (i1 < num_start_tokens) {
         if (token_count[i1] < NUM_PRECALCULATED_INSTANCE_LOGS) {
-          this_log_token_count_minus_log_num_token = log_instances[token_count[i1]] - log_num_token;
-          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_token;
-          order_0_entropy -= (double)token_count[i1++] * this_log_token_count_minus_log_num_token;
+          this_log_token_count_minus_log_num_tokens = log_instances[token_count[i1]] - log_num_tokens;
+          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_tokens;
+          order_0_entropy -= (double)token_count[i1++] * this_log_token_count_minus_log_num_tokens;
         }
         else {
           d_token_count = (double)token_count[i1];
-          this_log_token_count_minus_log_num_token = log(d_token_count) - log_num_token;
-          log_token_count_minus_log_num_tokens[i1++] = this_log_token_count_minus_log_num_token;
-          order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_token;
+          this_log_token_count_minus_log_num_tokens = log2(d_token_count) - log_num_tokens;
+          log_token_count_minus_log_num_tokens[i1++] = this_log_token_count_minus_log_num_tokens;
+          order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_tokens;
         }
       }
       d_token_count = (double)num_tokens_defined;
-      this_log_token_count_minus_log_num_token = log(d_token_count) - log_num_token;
-      order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_token;
+      this_log_token_count_minus_log_num_tokens = log2(d_token_count) - log_num_tokens;
+      order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_tokens;
     }
-    order_0_entropy *= log2_inv * d_num_token_inv;
+    order_0_entropy *= d_num_token_inv;
     fprintf(stderr,"%u: %u syms, dict. size %u, %.4f bits/sym, o0e %u bytes\n",
         ++scan_cycle,num_in_tokens,num_tokens_defined,order_0_entropy,(unsigned int)(d_num_token*order_0_entropy/8.0));
 
@@ -2740,21 +2745,27 @@ top_sub:
           if (min_score < prior_min_score) {
             if (scan_cycle > 50) {
               if (scan_cycle > 100)
+//                new_min_score = 0.993 * min_score * (min_score / prior_min_score) - 0.05;
                 new_min_score = 0.993 * min_score * (min_score / prior_min_score) - 0.05;
               else
+//                new_min_score = 0.99 * min_score * (min_score / prior_min_score) - 0.1;
                 new_min_score = 0.99 * min_score * (min_score / prior_min_score) - 0.1;
             }
             else
+//              new_min_score = 0.98 * min_score * (min_score / prior_min_score) - 0.1;
               new_min_score = 0.98 * min_score * (min_score / prior_min_score) - 0.1;
           }
           else
-            new_min_score = 0.475 * (prior_min_score + min_score);
+//            new_min_score = 0.475 * (prior_min_score + min_score);
+            new_min_score = 0.47 * (prior_min_score + min_score);
         }
         else {
           if (min_score < prior_min_score)
-            new_min_score = 0.96 * min_score * (min_score / prior_min_score) - 0.2;
+//            new_min_score = 0.96 * min_score * (min_score / prior_min_score) - 0.2;
+            new_min_score = 0.95 * min_score * (min_score / prior_min_score) - 0.2;
           else
-            new_min_score = 0.46 * (prior_min_score + min_score) - 0.2;
+//            new_min_score = 0.46 * (prior_min_score + min_score) - 0.2;
+            new_min_score = 0.45 * (prior_min_score + min_score) - 0.2;
         }
       }
       else {

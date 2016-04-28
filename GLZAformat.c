@@ -86,7 +86,7 @@ int main(int argc, char* argv[])
     if ((this_char >= 'A') && (this_char <= 'Z')) {
       num_AZ++;
       next_char = *in_char_ptr;
-      if ((next_char >= 'a') && (next_char <= 'z'))
+      if (((next_char >= 'a') && (next_char <= 'z')) || ((next_char >= 'A') && (next_char <= 'Z')))
         num_az_post_AZ++;
     }
     while (in_char_ptr != end_char_ptr - 1) {
@@ -119,9 +119,9 @@ int main(int argc, char* argv[])
       if ((this_char >= 'A') && (this_char <= 'Z')) {
         num_AZ++;
         next_char = *in_char_ptr;
-        if ((next_char >= 'a') && (next_char <= 'z'))
+        if (((next_char >= 'a') && (next_char <= 'z')) || ((next_char >= 'A') && (next_char <= 'Z')))
           num_az_post_AZ++;
-        if ((prev_char >= 'a') && (prev_char <= 'z'))
+        if (((prev_char >= 'a') && (prev_char <= 'z')) || ((prev_char >= 'A') && (prev_char <= 'Z')))
           num_az_pre_AZ++;
       }
       prev_char = this_char;
@@ -162,7 +162,7 @@ int main(int argc, char* argv[])
   out_char_ptr = out_char_buffer;
   num_out_char = 0;
 
-  if ((num_AZ > (num_in_char >> 10)) && (2 * num_az_post_AZ > num_AZ) && (num_az_post_AZ > 10 * num_az_pre_AZ)) {
+  if (num_AZ && (2 * num_az_post_AZ > num_AZ) && (2 * num_az_post_AZ > 3 * num_az_pre_AZ)) {
     printf("Pre and capital encoding %u bytes\n",num_in_char);
     fputc(1,fd_out);
     while (in_char_ptr != end_char_ptr) {
@@ -252,5 +252,5 @@ int main(int argc, char* argv[])
   fwrite(out_char_buffer, 1, out_char_ptr - out_char_buffer, fd_out);
   num_out_char += out_char_ptr - out_char_buffer;
   fclose(fd_out);
-  printf("Wrote 1 byte header and %u encoded bytes in %.3f seconds.\n",num_out_char,0.001*(float)(clock()-start_time));
+  printf("Wrote 1 byte header and %u data bytes in %.3f seconds.\n",num_out_char,0.001*(float)(clock()-start_time));
 }

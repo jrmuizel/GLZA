@@ -26,13 +26,12 @@ limitations under the License.
 #include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
-
+#define decode
 const unsigned char CAP_CHAR = 0x43;
 const unsigned int START_UTF8_2BYTE_symbols = 0x80;
 const unsigned int START_UTF8_3BYTE_symbols = 0x800;
 const unsigned int START_UTF8_4BYTE_symbols = 0x10000;
-
-const unsigned int MAX_INSTANCES_FOR_MTF_QUEUE = 20;
+const unsigned int MAX_INSTANCES_FOR_MTF_QUEUE = 15;
 const unsigned int MTF_QUEUE_SIZE = 64;
 const unsigned int CHARS_TO_WRITE = 1000000;
 const unsigned int MAX_SYMBOLS_DEFINED = 0x00C00000;
@@ -40,25 +39,17 @@ const unsigned int INITIAL_LIST_SIZE = 0x800;
 const unsigned int BIG_LIST_SIZE = 0x400000;
 
 unsigned char out_char0[12000000], out_char1[12000000];
-unsigned char mtf_queue_miss_code_length[21], mtf_queue_offset[21];
+unsigned char mtf_queue_miss_code_length[16], mtf_queue_size[16], mtf_queue_offset[16];
 unsigned char symbol_strings[500000000], new_symbol_string[0x00C00000];
-unsigned char symbol_type[0x00C00000];  // bit 0: string ends CAP_CHAR, bit1: string starts a-z, bit2: nonergodic. bit3: in queue
-unsigned char lookup_bits[0x101][0x1000];
-unsigned char symbol_count, num_threads, max_code_length, max_regular_code_length, found_first_symbol, end_symbol;
+unsigned char lookup_bits[0x100][0x1000];
+unsigned char symbol_count, num_threads, max_code_length, max_regular_code_length, find_first_symbol, end_symbol;
 unsigned char UTF8_compliant, base_bits, cap_encoded, use_mtf, caps_on, prior_is_cap, write_caps_on, delta_gap, delta_on;
-unsigned char out_buffer_num;
+unsigned char out_buffer_num, out_buffers_sent, prior_end;
+unsigned char bin_bits_under_max[0x100];
 unsigned char *symbol_string_ptr, *next_string_ptr, *next_symbol_string_ptr, *out_char_ptr, *start_char_ptr, *extra_out_char_ptr;
-unsigned char symbols_remaining[0x00C00000], symbol_instances[0x00C00000];
-unsigned char starts[0x00C00000], ends[0x00C00000];
-unsigned char big_sym_list[0x101][26];
-char nbob_shift[0x101];
-unsigned int symbol_string_indexes[0x00C00000];
-unsigned int i1, i2, num_symbols_defined, symbol, symbol_number, out_symbol_count, temp_bits;
-unsigned int out_chars, out_buffers_sent, chars_to_write, num_az, symbol_index, symbol_to_move, prior_end;
-unsigned int max_code_length_symbols_per_bin, min_extra_reduce_index;
-unsigned int nsob[0x101][26], nbob[0x101][26], sum_nbob[0x101];
-unsigned int symbol_array_index[0x00C00000];
-unsigned int mtf_queue[21][64], mtf_queue_size[21];
+unsigned int i1, i2, num_symbols_defined, symbol, symbol_number, out_symbol_count;
+unsigned int out_chars, chars_to_write, symbol_index, symbol_to_move, min_extra_reduce_index;
+unsigned int mtf_queue[16][64];
 unsigned int mtfg_queue_0[8], mtfg_queue_0_offset;
 unsigned int mtfg_queue_8[8], mtfg_queue_8_offset;
 unsigned int mtfg_queue_16[0x10], mtfg_queue_16_offset;
@@ -66,17 +57,30 @@ unsigned int mtfg_queue_32[0x20], mtfg_queue_32_offset;
 unsigned int mtfg_queue_64[0x40], mtfg_queue_64_offset;
 unsigned int mtfg_queue_128[0x40], mtfg_queue_128_offset;
 unsigned int mtfg_queue_192[0x40], mtfg_queue_192_offset;
+unsigned int big_sym_list[0x100];
+unsigned int nsob[0x100][26];
 unsigned int *mtf_queue_ptr, *mtf_queue_top_ptr;
 unsigned int *symbol_array_start_ptr, *symbol_array_end_ptr, *symbol_array_ptr;
-unsigned int *sym_list_ptrs[0x101][26];
-unsigned short int fbob[0x101][26];
-
+unsigned int *sym_list_ptrs[0x100][26];
+unsigned short int nbob[0x100][26], sum_nbob[0x100], fbob[0x100][26];
 volatile unsigned char output_ready, done_parsing;
 volatile unsigned int out_symbol_array[0x40000];
-
 FILE *fd_in, *fd_out;
 
+struct sym_data {
+  unsigned char type;  // bit 0: string ends CAP_CHAR, bit1: string starts a-z, bit2: nonergodic, bit3: in queue
+      // bit 4: "word", bit 5: non-"word", bit 6: likely to be followed by ' ', bit 7: not likely to be followed by ' '
+  unsigned char instances;
+  unsigned char remaining;
+  unsigned char starts;
+  unsigned char ends;
+  unsigned int string_index;
+  unsigned int array_index;
+} symbol_data[0x00C00000];
+
+
 #include "GLZAmodel.h"
+
 
 
 #define remove_mtfg_queue_symbol_16() { \
@@ -192,47 +196,47 @@ FILE *fd_in, *fd_out;
 
 
 #define add_new_symbol_to_mtfg_queue(symbol_number) { \
-  symbol_type[symbol_number] |= 8; \
+  symbol_data[symbol_number].type |= 8; \
   mtfg_queue_8_offset = (mtfg_queue_8_offset - 1) & 7; \
   unsigned int mtfg_queue_symbol_15 = *(mtfg_queue_8 + mtfg_queue_8_offset); \
   mtfg_queue_0_offset = (mtfg_queue_0_offset - 1) & 7; \
   *(mtfg_queue_8 + mtfg_queue_8_offset) = *(mtfg_queue_0 + mtfg_queue_0_offset); \
   *(mtfg_queue_0 + mtfg_queue_0_offset) = symbol_number; \
-  if (symbol_instances[mtfg_queue_symbol_15] > 32) { \
+  if (symbol_data[mtfg_queue_symbol_15].instances - MAX_INSTANCES_FOR_MTF_QUEUE > 12) { \
     mtfg_queue_16_offset = (mtfg_queue_16_offset - 1) & 0xF; \
     unsigned int mtfg_queue_symbol_31 = *(mtfg_queue_16 + mtfg_queue_16_offset); \
     *(mtfg_queue_16 + mtfg_queue_16_offset) = mtfg_queue_symbol_15; \
-    if (symbol_instances[mtfg_queue_symbol_31] != 33) { \
+    if (symbol_data[mtfg_queue_symbol_31].instances - MAX_INSTANCES_FOR_MTF_QUEUE != 13) { \
       mtfg_queue_32_offset = (mtfg_queue_32_offset - 1) & 0x1F; \
       unsigned int mtfg_queue_symbol_63 = *(mtfg_queue_32 + mtfg_queue_32_offset); \
       *(mtfg_queue_32 + mtfg_queue_32_offset) = mtfg_queue_symbol_31; \
-      if (symbol_instances[mtfg_queue_symbol_63] != 34) { \
+      if (symbol_data[mtfg_queue_symbol_63].instances - MAX_INSTANCES_FOR_MTF_QUEUE != 14) { \
         mtfg_queue_64_offset = (mtfg_queue_64_offset - 1) & 0x3F; \
         unsigned int mtfg_queue_symbol_127 = *(mtfg_queue_64 + mtfg_queue_64_offset); \
         *(mtfg_queue_64 + mtfg_queue_64_offset) = mtfg_queue_symbol_63; \
-        if (symbol_instances[mtfg_queue_symbol_127] != 35) { \
+        if (symbol_data[mtfg_queue_symbol_127].instances - MAX_INSTANCES_FOR_MTF_QUEUE != 15) { \
           mtfg_queue_128_offset = (mtfg_queue_128_offset - 1) & 0x3F; \
           unsigned int mtfg_queue_symbol_191 = *(mtfg_queue_128 + mtfg_queue_128_offset); \
           *(mtfg_queue_128 + mtfg_queue_128_offset) = mtfg_queue_symbol_127; \
-          if (symbol_instances[mtfg_queue_symbol_191] != 36) { \
+          if (symbol_data[mtfg_queue_symbol_191].instances - MAX_INSTANCES_FOR_MTF_QUEUE != 16) { \
             mtfg_queue_192_offset = (mtfg_queue_192_offset - 1) & 0x3F; \
-            symbol_type[*(mtfg_queue_192 + mtfg_queue_192_offset)] &= 7; \
+            symbol_data[*(mtfg_queue_192 + mtfg_queue_192_offset)].type &= 0xF7; \
             *(mtfg_queue_192 + mtfg_queue_192_offset) = mtfg_queue_symbol_191; \
           } \
           else \
-            symbol_type[mtfg_queue_symbol_191] &= 7; \
+            symbol_data[mtfg_queue_symbol_191].type &= 0xF7; \
         } \
         else \
-          symbol_type[mtfg_queue_symbol_127] &= 7; \
+          symbol_data[mtfg_queue_symbol_127].type &= 0xF7; \
       } \
       else \
-        symbol_type[mtfg_queue_symbol_63] &= 7; \
+        symbol_data[mtfg_queue_symbol_63].type &= 0xF7; \
     } \
     else \
-      symbol_type[mtfg_queue_symbol_31] &= 7; \
+      symbol_data[mtfg_queue_symbol_31].type &= 0xF7; \
   } \
   else \
-    symbol_type[mtfg_queue_symbol_15] &= 7; \
+    symbol_data[mtfg_queue_symbol_15].type &= 0xF7; \
 }
 
 
@@ -240,16 +244,14 @@ FILE *fd_in, *fd_out;
   unsigned int mtfg_queue_symbol_15, mtfg_queue_symbol_31, mtfg_queue_symbol_63, mtfg_queue_symbol_127, mtfg_queue_symbol_191; \
   if (mtfg_queue_position < 8) { \
     if (mtfg_queue_position < 5) { \
-      mtfg_queue_position += mtfg_queue_0_offset; \
-      symbol_number = mtfg_queue_0[mtfg_queue_position & 7]; \
+      symbol_number = mtfg_queue_0[(mtfg_queue_position += mtfg_queue_0_offset) & 7]; \
       while (mtfg_queue_position != mtfg_queue_0_offset) { \
         *(mtfg_queue_0 + (mtfg_queue_position & 7)) = *(mtfg_queue_0 + ((mtfg_queue_position - 1) & 7)); \
         mtfg_queue_position--; \
       } \
     } \
     else { \
-      mtfg_queue_position += mtfg_queue_0_offset; \
-      symbol_number = mtfg_queue_0[mtfg_queue_position & 7]; \
+      symbol_number = mtfg_queue_0[(mtfg_queue_position += mtfg_queue_0_offset) & 7]; \
       mtfg_queue_0_offset += 7; \
       while (mtfg_queue_position != mtfg_queue_0_offset) { \
         *(mtfg_queue_0 + (mtfg_queue_position & 7)) = *(mtfg_queue_0 + ((mtfg_queue_position + 1) & 7)); \
@@ -260,8 +262,7 @@ FILE *fd_in, *fd_out;
   } \
   else if (mtfg_queue_position < 32) { \
     if (mtfg_queue_position < 16) { \
-      mtfg_queue_position += mtfg_queue_8_offset - 8; \
-      symbol_number = *(mtfg_queue_8 + (mtfg_queue_position & 7)); \
+      symbol_number = *(mtfg_queue_8 + ((mtfg_queue_position += mtfg_queue_8_offset - 8) & 7)); \
       while (mtfg_queue_position != mtfg_queue_8_offset) { \
         *(mtfg_queue_8 + (mtfg_queue_position & 7)) = *(mtfg_queue_8 + ((mtfg_queue_position - 1) & 7)); \
         mtfg_queue_position--; \
@@ -272,8 +273,8 @@ FILE *fd_in, *fd_out;
     else { \
       symbol_number = *(mtfg_queue_16 + ((mtfg_queue_position + mtfg_queue_16_offset) & 0xF)); \
       increment_mtfg_queue_0_8(); \
-      if (symbol_instances[mtfg_queue_symbol_15] <= 32) { \
-        symbol_type[mtfg_queue_symbol_15] &= 7; \
+      if (symbol_data[mtfg_queue_symbol_15].instances - MAX_INSTANCES_FOR_MTF_QUEUE <= 12) { \
+        symbol_data[mtfg_queue_symbol_15].type &= 0xF7; \
         remove_mtfg_queue_symbol_16(); \
       } \
       else { \
@@ -289,14 +290,14 @@ FILE *fd_in, *fd_out;
   else if (mtfg_queue_position < 64) { \
     symbol_number = *(mtfg_queue_32 + ((mtfg_queue_position + mtfg_queue_32_offset) & 0x1F)); \
     increment_mtfg_queue_0_8(); \
-    if (symbol_instances[mtfg_queue_symbol_15] <= 32) { \
-      symbol_type[mtfg_queue_symbol_15] &= 7; \
+    if (symbol_data[mtfg_queue_symbol_15].instances - MAX_INSTANCES_FOR_MTF_QUEUE <= 12) { \
+      symbol_data[mtfg_queue_symbol_15].type &= 0xF7; \
       remove_mtfg_queue_symbol_32(); \
     } \
     else { \
       increment_mtfg_queue_16(); \
-      if (symbol_instances[mtfg_queue_symbol_31] == 33) { \
-        symbol_type[mtfg_queue_symbol_31] &= 7; \
+      if (symbol_data[mtfg_queue_symbol_31].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 13) { \
+        symbol_data[mtfg_queue_symbol_31].type &= 0xF7; \
         remove_mtfg_queue_symbol_32(); \
       } \
       else { \
@@ -312,20 +313,20 @@ FILE *fd_in, *fd_out;
   else if (mtfg_queue_position < 128) { \
     symbol_number = *(mtfg_queue_64 + ((mtfg_queue_position + mtfg_queue_64_offset) & 0x3F)); \
     increment_mtfg_queue_0_8(); \
-    if (symbol_instances[mtfg_queue_symbol_15] <= 32) { \
-      symbol_type[mtfg_queue_symbol_15] &= 7; \
+    if (symbol_data[mtfg_queue_symbol_15].instances - MAX_INSTANCES_FOR_MTF_QUEUE <= 12) { \
+      symbol_data[mtfg_queue_symbol_15].type &= 0xF7; \
       remove_mtfg_queue_symbol_64(); \
     } \
     else { \
       increment_mtfg_queue_16(); \
-      if (symbol_instances[mtfg_queue_symbol_31] == 33) { \
-        symbol_type[mtfg_queue_symbol_31] &= 7; \
+      if (symbol_data[mtfg_queue_symbol_31].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 13) { \
+        symbol_data[mtfg_queue_symbol_31].type &= 0xF7; \
         remove_mtfg_queue_symbol_64(); \
       } \
       else { \
         increment_mtfg_queue_32(); \
-        if (symbol_instances[mtfg_queue_symbol_63] == 34) { \
-          symbol_type[mtfg_queue_symbol_63] &= 7; \
+        if (symbol_data[mtfg_queue_symbol_63].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 14) { \
+          symbol_data[mtfg_queue_symbol_63].type &= 0xF7; \
           remove_mtfg_queue_symbol_64(); \
         } \
         else { \
@@ -342,26 +343,26 @@ FILE *fd_in, *fd_out;
   else if (mtfg_queue_position < 192) { \
     symbol_number = *(mtfg_queue_128 + ((mtfg_queue_position + mtfg_queue_128_offset) & 0x3F)); \
     increment_mtfg_queue_0_8(); \
-    if (symbol_instances[mtfg_queue_symbol_15] <= 32) { \
-      symbol_type[mtfg_queue_symbol_15] &= 7; \
+    if (symbol_data[mtfg_queue_symbol_15].instances - MAX_INSTANCES_FOR_MTF_QUEUE <= 12) { \
+      symbol_data[mtfg_queue_symbol_15].type &= 0xF7; \
       remove_mtfg_queue_symbol_128(); \
     } \
     else { \
       increment_mtfg_queue_16(); \
-      if (symbol_instances[mtfg_queue_symbol_31] == 33) { \
-        symbol_type[mtfg_queue_symbol_31] &= 7; \
+      if (symbol_data[mtfg_queue_symbol_31].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 13) { \
+        symbol_data[mtfg_queue_symbol_31].type &= 0xF7; \
         remove_mtfg_queue_symbol_128(); \
       } \
       else { \
         increment_mtfg_queue_32(); \
-        if (symbol_instances[mtfg_queue_symbol_63] == 34) { \
-          symbol_type[mtfg_queue_symbol_63] &= 7; \
+        if (symbol_data[mtfg_queue_symbol_63].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 14) { \
+          symbol_data[mtfg_queue_symbol_63].type &= 0xF7; \
           remove_mtfg_queue_symbol_128(); \
         } \
         else { \
           increment_mtfg_queue_64(); \
-          if (symbol_instances[mtfg_queue_symbol_127] == 35) { \
-            symbol_type[mtfg_queue_symbol_127] &= 7; \
+          if (symbol_data[mtfg_queue_symbol_127].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 15) { \
+            symbol_data[mtfg_queue_symbol_127].type &= 0xF7; \
             remove_mtfg_queue_symbol_128(); \
           } \
           else { \
@@ -379,32 +380,32 @@ FILE *fd_in, *fd_out;
   else { \
     symbol_number = *(mtfg_queue_192 + ((mtfg_queue_position + mtfg_queue_192_offset) & 0x3F)); \
     increment_mtfg_queue_0_8(); \
-    if (symbol_instances[mtfg_queue_symbol_15] <= 32) { \
-      symbol_type[mtfg_queue_symbol_15] &= 7; \
+    if (symbol_data[mtfg_queue_symbol_15].instances - MAX_INSTANCES_FOR_MTF_QUEUE <= 12) { \
+      symbol_data[mtfg_queue_symbol_15].type &= 0xF7; \
       remove_mtfg_queue_symbol_192(); \
     } \
     else { \
       increment_mtfg_queue_16(); \
-      if (symbol_instances[mtfg_queue_symbol_31] == 33) { \
-        symbol_type[mtfg_queue_symbol_31] &= 7; \
+      if (symbol_data[mtfg_queue_symbol_31].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 13) { \
+        symbol_data[mtfg_queue_symbol_31].type &= 0xF7; \
         remove_mtfg_queue_symbol_192(); \
       } \
       else { \
         increment_mtfg_queue_32(); \
-        if (symbol_instances[mtfg_queue_symbol_63] == 34) { \
-          symbol_type[mtfg_queue_symbol_63] &= 7; \
+        if (symbol_data[mtfg_queue_symbol_63].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 14) { \
+          symbol_data[mtfg_queue_symbol_63].type &= 0xF7; \
           remove_mtfg_queue_symbol_192(); \
         } \
         else { \
           increment_mtfg_queue_64(); \
-          if (symbol_instances[mtfg_queue_symbol_127] == 35) { \
-            symbol_type[mtfg_queue_symbol_127] &= 7; \
+          if (symbol_data[mtfg_queue_symbol_127].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 15) { \
+            symbol_data[mtfg_queue_symbol_127].type &= 0xF7; \
             remove_mtfg_queue_symbol_192(); \
           } \
           else { \
             increment_mtfg_queue_128(); \
-            if (symbol_instances[mtfg_queue_symbol_191] == 36) { \
-              symbol_type[mtfg_queue_symbol_191] &= 7; \
+            if (symbol_data[mtfg_queue_symbol_191].instances - MAX_INSTANCES_FOR_MTF_QUEUE == 16) { \
+              symbol_data[mtfg_queue_symbol_191].type &= 0xF7; \
               remove_mtfg_queue_symbol_192(); \
             } \
             else { \
@@ -421,34 +422,112 @@ FILE *fd_in, *fd_out;
     } \
   } \
   *(mtfg_queue_0 + mtfg_queue_0_offset) = symbol_number; \
-  symbol_type[symbol_number] |= 8; \
 }
 
 
 #define get_mtfg_symbol() { \
-  DecodeMtfgQueuePos(NOT_CAP); \
-  update_mtfg_queue(); \
+  DecodeMtfgQueuePosStart(NOT_CAP); \
+  if (DecodeMtfgQueuePosCheck0(NOT_CAP)) { \
+    DecodeMtfgQueuePosFinish0(NOT_CAP); \
+    symbol_number = mtfg_queue_0[mtfg_queue_0_offset & 7]; \
+  } \
+  else { \
+    DecodeMtfgQueuePosFinish(NOT_CAP); \
+    update_mtfg_queue(); \
+  } \
 }
 
 
+
 #define get_mtfg_symbol_cap() { \
-  DecodeMtfgQueuePos(CAP); \
-  unsigned int find_caps = mtfg_queue_position + 1; \
-  unsigned int cap_queue_position = mtfg_queue_0_offset; \
-  do { \
-    if (symbol_type[*(mtfg_queue_0 + (cap_queue_position & 7))] & 2) { \
-      find_caps--; \
-      if (find_caps == 0) \
-        break; \
-    } \
-    else \
-      mtfg_queue_position++; \
-    cap_queue_position = (cap_queue_position + 1) & 7; \
-  } while (cap_queue_position != mtfg_queue_0_offset); \
-  if (find_caps) { \
-    cap_queue_position = mtfg_queue_8_offset; \
+  DecodeMtfgQueuePosStart(CAP); \
+  if (DecodeMtfgQueuePosCheck0(CAP)) { \
+    DecodeMtfgQueuePosFinish0(CAP); \
+    unsigned int find_caps = 1; \
+    unsigned int cap_queue_position = mtfg_queue_0_offset; \
     do { \
-      if (symbol_type[*(mtfg_queue_8 + (cap_queue_position & 7))] & 2) { \
+      if (symbol_data[*(mtfg_queue_0 + cap_queue_position)].type & 2) { \
+        find_caps = 0; \
+        break; \
+      } \
+      else \
+        mtfg_queue_position++; \
+      cap_queue_position = (cap_queue_position + 1) & 7; \
+    } while (cap_queue_position != mtfg_queue_0_offset); \
+    if (find_caps) { \
+      cap_queue_position = mtfg_queue_8_offset; \
+      do { \
+        if (symbol_data[*(mtfg_queue_8 + cap_queue_position)].type & 2) { \
+          find_caps = 0; \
+          break; \
+        } \
+        else \
+          mtfg_queue_position++; \
+        cap_queue_position = (cap_queue_position + 1) & 7; \
+      } while (cap_queue_position != mtfg_queue_8_offset); \
+      if (find_caps) { \
+        cap_queue_position = mtfg_queue_16_offset; \
+        do { \
+          if (symbol_data[*(mtfg_queue_16 + cap_queue_position)].type & 2) { \
+            find_caps = 0; \
+            break; \
+          } \
+          else \
+            mtfg_queue_position++; \
+          cap_queue_position = (cap_queue_position + 1) & 0xF; \
+        } while (cap_queue_position != mtfg_queue_16_offset); \
+        if (find_caps) { \
+          cap_queue_position = mtfg_queue_32_offset; \
+          do { \
+            if (symbol_data[*(mtfg_queue_32 + cap_queue_position)].type & 2) { \
+              find_caps = 0; \
+              break; \
+            } \
+            else \
+              mtfg_queue_position++; \
+            cap_queue_position = (cap_queue_position + 1) & 0x1F; \
+          } while (cap_queue_position != mtfg_queue_32_offset); \
+          if (find_caps) { \
+            cap_queue_position = mtfg_queue_64_offset; \
+            do { \
+              if (symbol_data[*(mtfg_queue_64 + cap_queue_position)].type & 2) { \
+                find_caps = 0; \
+                break; \
+              } \
+              else \
+                mtfg_queue_position++; \
+              cap_queue_position = (cap_queue_position + 1) & 0x3F; \
+            } while (cap_queue_position != mtfg_queue_64_offset); \
+            if (find_caps) { \
+              cap_queue_position = mtfg_queue_128_offset; \
+              do { \
+                if (symbol_data[*(mtfg_queue_128 + cap_queue_position)].type & 2) { \
+                  find_caps = 0; \
+                  break; \
+                } \
+                else \
+                  mtfg_queue_position++; \
+                cap_queue_position = (cap_queue_position + 1) & 0x3F; \
+              } while (cap_queue_position != mtfg_queue_128_offset); \
+              if (find_caps) { \
+                cap_queue_position = mtfg_queue_192_offset; \
+                while (symbol_data[*(mtfg_queue_192 + cap_queue_position)].type & 2) { \
+                  mtfg_queue_position++; \
+                  cap_queue_position = (cap_queue_position + 1) & 0x3F; \
+                } while (1); \
+              } \
+            } \
+          } \
+        } \
+      } \
+    } \
+  } \
+  else { \
+    DecodeMtfgQueuePosFinish(CAP); \
+    unsigned int find_caps = mtfg_queue_position + 1; \
+    unsigned int cap_queue_position = mtfg_queue_0_offset; \
+    do { \
+      if (symbol_data[*(mtfg_queue_0 + cap_queue_position)].type & 2) { \
         find_caps--; \
         if (find_caps == 0) \
           break; \
@@ -456,98 +535,107 @@ FILE *fd_in, *fd_out;
       else \
         mtfg_queue_position++; \
       cap_queue_position = (cap_queue_position + 1) & 7; \
-    } while (cap_queue_position != mtfg_queue_8_offset); \
-  }\
-  if (find_caps) { \
-    cap_queue_position = mtfg_queue_16_offset; \
-    do { \
-      if (symbol_type[*(mtfg_queue_16 + (cap_queue_position & 0xF))] & 2) { \
-        find_caps--; \
-        if (find_caps == 0) \
-          break; \
+    } while (cap_queue_position != mtfg_queue_0_offset); \
+    if (find_caps) { \
+      cap_queue_position = mtfg_queue_8_offset; \
+      do { \
+        if (symbol_data[*(mtfg_queue_8 + cap_queue_position)].type & 2) { \
+          find_caps--; \
+          if (find_caps == 0) \
+            break; \
+        } \
+        else \
+          mtfg_queue_position++; \
+        cap_queue_position = (cap_queue_position + 1) & 7; \
+      } while (cap_queue_position != mtfg_queue_8_offset); \
+      if (find_caps) { \
+        cap_queue_position = mtfg_queue_16_offset; \
+        do { \
+          if (symbol_data[*(mtfg_queue_16 + cap_queue_position)].type & 2) { \
+            find_caps--; \
+            if (find_caps == 0) \
+              break; \
+          } \
+          else \
+            mtfg_queue_position++; \
+          cap_queue_position = (cap_queue_position + 1) & 0xF; \
+        } while (cap_queue_position != mtfg_queue_16_offset); \
+        if (find_caps) { \
+          cap_queue_position = mtfg_queue_32_offset; \
+          do { \
+            if (symbol_data[*(mtfg_queue_32 + cap_queue_position)].type & 2) { \
+              find_caps--; \
+              if (find_caps == 0) \
+                break; \
+            } \
+            else \
+              mtfg_queue_position++; \
+            cap_queue_position = (cap_queue_position + 1) & 0x1F; \
+          } while (cap_queue_position != mtfg_queue_32_offset); \
+          if (find_caps) { \
+            cap_queue_position = mtfg_queue_64_offset; \
+            do { \
+              if (symbol_data[*(mtfg_queue_64 + cap_queue_position)].type & 2) { \
+                find_caps--; \
+                if (find_caps == 0) \
+                  break; \
+              } \
+              else \
+                mtfg_queue_position++; \
+              cap_queue_position = (cap_queue_position + 1) & 0x3F; \
+            } while (cap_queue_position != mtfg_queue_64_offset); \
+            if (find_caps) { \
+              cap_queue_position = mtfg_queue_128_offset; \
+              do { \
+                if (symbol_data[*(mtfg_queue_128 + cap_queue_position)].type & 2) { \
+                  find_caps--; \
+                  if (find_caps == 0) \
+                    break; \
+                } \
+                else \
+                  mtfg_queue_position++; \
+                cap_queue_position = (cap_queue_position + 1) & 0x3F; \
+              } while (cap_queue_position != mtfg_queue_128_offset); \
+              if (find_caps) { \
+                cap_queue_position = mtfg_queue_192_offset; \
+                do { \
+                  if (symbol_data[*(mtfg_queue_192 + cap_queue_position)].type & 2) { \
+                    if (--find_caps == 0) \
+                      break; \
+                  } \
+                  else \
+                    mtfg_queue_position++; \
+                  cap_queue_position = (cap_queue_position + 1) & 0x3F; \
+                } while (1); \
+              } \
+            } \
+          } \
+        } \
       } \
-      else \
-        mtfg_queue_position++; \
-      cap_queue_position = (cap_queue_position + 1) & 0xF; \
-    } while (cap_queue_position != mtfg_queue_16_offset); \
-  }\
-  if (find_caps) { \
-    cap_queue_position = mtfg_queue_32_offset; \
-    do { \
-      if (symbol_type[*(mtfg_queue_32 + (cap_queue_position & 0x1F))] & 2) { \
-        find_caps--; \
-        if (find_caps == 0) \
-          break; \
-      } \
-      else \
-        mtfg_queue_position++; \
-      cap_queue_position = (cap_queue_position + 1) & 0x1F; \
-    } while (cap_queue_position != mtfg_queue_32_offset); \
-  }\
-  if (find_caps) { \
-    cap_queue_position = mtfg_queue_64_offset; \
-    do { \
-      if (symbol_type[*(mtfg_queue_64 + (cap_queue_position & 0x3F))] & 2) { \
-        find_caps--; \
-        if (find_caps == 0) \
-          break; \
-      } \
-      else \
-        mtfg_queue_position++; \
-      cap_queue_position = (cap_queue_position + 1) & 0x3F; \
-    } while (cap_queue_position != mtfg_queue_64_offset); \
-  }\
-  if (find_caps) { \
-    cap_queue_position = mtfg_queue_128_offset; \
-    do { \
-      if (symbol_type[*(mtfg_queue_128 + (cap_queue_position & 0x3F))] & 2) { \
-        find_caps--; \
-        if (find_caps == 0) \
-          break; \
-      } \
-      else \
-        mtfg_queue_position++; \
-      cap_queue_position = (cap_queue_position + 1) & 0x3F; \
-    } while (cap_queue_position != mtfg_queue_128_offset); \
-  }\
-  if (find_caps) { \
-    cap_queue_position = mtfg_queue_192_offset; \
-    do { \
-      if (symbol_type[*(mtfg_queue_192 + (cap_queue_position & 0x3F))] & 2) { \
-        find_caps--; \
-        if (find_caps == 0) \
-          break; \
-      } \
-      else \
-        mtfg_queue_position++; \
-      cap_queue_position = (cap_queue_position + 1) & 0x3F; \
-    } while (cap_queue_position != mtfg_queue_192_offset); \
-  }\
+    } \
+  } \
   update_mtfg_queue(); \
 }
 
 
 #define add_dictionary_symbol(symbol, bits) { \
-  unsigned char first_char = starts[symbol]; \
-  if (sym_list_ptrs[first_char][bits]) { \
-    if ((nsob[first_char][bits] == INITIAL_LIST_SIZE) && (big_sym_list[first_char][bits] == 0)) { \
-      big_sym_list[first_char][bits] = 1; \
-      sym_list_ptrs[first_char][bits] \
-          = (unsigned int *)realloc(sym_list_ptrs[first_char][bits], sizeof(unsigned int) * BIG_LIST_SIZE); \
-    } \
+  unsigned char first_char = symbol_data[symbol].starts; \
+  if ((nsob[first_char][bits] == INITIAL_LIST_SIZE) && ((big_sym_list[first_char] & (1 << bits)) == 0)) { \
+    big_sym_list[first_char] |= 1 << bits; \
+    sym_list_ptrs[first_char][bits] \
+        = (unsigned int *)realloc(sym_list_ptrs[first_char][bits], sizeof(unsigned int) * BIG_LIST_SIZE); \
   } \
-  else \
-    sym_list_ptrs[first_char][bits] = (unsigned int *)malloc(sizeof(unsigned int) * INITIAL_LIST_SIZE); \
-  symbol_array_index[symbol] = nsob[first_char][bits]; \
+  symbol_data[symbol].array_index = nsob[first_char][bits]; \
   sym_list_ptrs[first_char][bits][nsob[first_char][bits]++] = symbol; \
-  if ((nsob[first_char][bits] << (32 - bits)) > (nbob[first_char][bits] << (20 - nbob_shift[first_char]))) { \
-    if (bits >= 12 + nbob_shift[first_char]) { /* add a bin */ \
+  if ((nsob[first_char][bits] << (32 - bits)) \
+      > ((unsigned int)nbob[first_char][bits] << (32 - bin_bits_under_max[first_char]))) { \
+    if (bits >= bin_bits_under_max[first_char]) { /* add a bin */ \
       if (++sum_nbob[first_char] <= 0x1000) { \
         if (bits == max_code_length) \
           nbob[first_char][bits]++; \
         else { \
           lookup_bits[first_char][fbob[first_char][bits] + nbob[first_char][bits]++] = bits; \
-          temp_bits = bits; \
+          unsigned char temp_bits = bits; \
           while (++temp_bits != max_code_length) { \
             if (nbob[first_char][temp_bits]) \
               lookup_bits[first_char][fbob[first_char][temp_bits] + nbob[first_char][temp_bits]] = temp_bits; \
@@ -560,13 +648,14 @@ FILE *fd_in, *fd_out;
         nbob[first_char][bits]++; \
         unsigned char code_length; \
         do { \
-          nbob_shift[first_char]--; \
+          bin_bits_under_max[first_char]--; \
           sum_nbob[first_char] = 0; \
           for (code_length = 1 ; code_length <= max_code_length ; code_length++) \
             sum_nbob[first_char] += (nbob[first_char][code_length] = (nbob[first_char][code_length] + 1) >> 1); \
         } while (sum_nbob[first_char] > 0x1000); \
         unsigned short int bin = nbob[first_char][1]; \
-        for (temp_bits = 2 ; temp_bits <= max_code_length ; temp_bits++) { \
+        unsigned char temp_bits; \
+        for (temp_bits = 1 ; temp_bits <= max_code_length ; temp_bits++) { \
           fbob[first_char][temp_bits] = bin; \
           bin += nbob[first_char][temp_bits]; \
         } \
@@ -579,30 +668,59 @@ FILE *fd_in, *fd_out;
       } \
     } \
     else { /* add multiple bins */ \
-      if ((sum_nbob[first_char] += 1 << (12 + nbob_shift[first_char] - bits)) <= 0x1000) { \
+      unsigned int new_bins = 1 << (bin_bits_under_max[first_char] - bits); \
+      if (sum_nbob[first_char] + new_bins <= 0x1000) { \
+        sum_nbob[first_char] += new_bins; \
         do { \
           lookup_bits[first_char][fbob[first_char][bits] + nbob[first_char][bits]] = bits; \
           nbob[first_char][bits]++; \
-          temp_bits = bits; \
+          unsigned char temp_bits = bits; \
           while (++temp_bits != max_code_length) { \
             if (nbob[first_char][temp_bits]) \
               lookup_bits[first_char][fbob[first_char][temp_bits] + nbob[first_char][temp_bits]] = temp_bits; \
             fbob[first_char][temp_bits]++; \
           } \
-        } while ((nsob[first_char][bits] << (12 + nbob_shift[first_char] - bits)) > nbob[first_char][bits]); \
-        fbob[first_char][max_code_length] += 1 << (12 + nbob_shift[first_char] - bits); \
+        } while ((nsob[first_char][bits] << (bin_bits_under_max[first_char] - bits)) > (unsigned int)nbob[first_char][bits]); \
+        fbob[first_char][max_code_length] += 1 << (bin_bits_under_max[first_char] - bits); \
       } \
-      else { \
-        nbob[first_char][bits] += 1 << (12 + nbob_shift[first_char] - bits); \
+      else if (new_bins <= 0x1000) { \
+        unsigned char bin_shift; \
+        nbob[first_char][bits] += new_bins; \
         unsigned char code_length; \
         do { \
-          nbob_shift[first_char]--; \
+          bin_bits_under_max[first_char]--; \
           sum_nbob[first_char] = 0; \
           for (code_length = 1 ; code_length <= max_code_length ; code_length++) \
             sum_nbob[first_char] += (nbob[first_char][code_length] = (nbob[first_char][code_length] + 1) >> 1); \
         } while (sum_nbob[first_char] > 0x1000); \
         unsigned short int bin = nbob[first_char][1]; \
+        unsigned char temp_bits; \
         for (temp_bits = 2 ; temp_bits <= max_code_length ; temp_bits++) { \
+          fbob[first_char][temp_bits] = bin; \
+          bin += nbob[first_char][temp_bits]; \
+        } \
+        bin = 0; \
+        for (code_length = 1 ; code_length < max_code_length ; code_length++) \
+          while (bin < fbob[first_char][code_length+1]) \
+            lookup_bits[first_char][bin++] = code_length; \
+        while (bin < 0x1000) \
+          lookup_bits[first_char][bin++] = max_code_length; \
+      } \
+      else { \
+        unsigned char bin_shift = bin_bits_under_max[first_char] - 12 - bits; \
+        if (sum_nbob[first_char]) \
+          bin_shift++; \
+        bin_bits_under_max[first_char] -= bin_shift; \
+        sum_nbob[first_char] = 0; \
+        unsigned char code_length; \
+        for (code_length = 1 ; code_length <= max_code_length ; code_length++) \
+          sum_nbob[first_char] += (nbob[first_char][code_length] \
+              = (nbob[first_char][code_length] + (1 << bin_shift) - 1) >> bin_shift); \
+        nbob[first_char][bits] += new_bins >> bin_shift; \
+        sum_nbob[first_char] += new_bins >> bin_shift; \
+        unsigned short int bin = nbob[first_char][1]; \
+        unsigned char temp_bits; \
+        for (temp_bits = 1 ; temp_bits <= max_code_length ; temp_bits++) { \
           fbob[first_char][temp_bits] = bin; \
           bin += nbob[first_char][temp_bits]; \
         } \
@@ -619,112 +737,134 @@ FILE *fd_in, *fd_out;
 
 
 #define remove_dictionary_symbol(symbol, bits) { \
-  unsigned char first_char = starts[symbol]; \
-  sym_list_ptrs[first_char][bits][symbol_array_index[symbol]] = sym_list_ptrs[first_char][bits][--nsob[first_char][bits]]; \
-  symbol_array_index[sym_list_ptrs[first_char][bits][nsob[first_char][bits]]] = symbol_array_index[symbol]; \
+  unsigned char first_char = symbol_data[symbol].starts; \
+  sym_list_ptrs[first_char][bits][symbol_data[symbol].array_index] = sym_list_ptrs[first_char][bits][--nsob[first_char][bits]]; \
+  symbol_data[sym_list_ptrs[first_char][bits][nsob[first_char][bits]]].array_index = symbol_data[symbol].array_index; \
 }
 
 
 #define insert_mtf_queue(cap_type) { \
   remove_dictionary_symbol(symbol_number,CodeLength); \
-  if (--symbols_remaining[symbol_number]) { \
-    symbol_count = symbol_instances[symbol_number]; \
+  if (--symbol_data[symbol_number].remaining) { \
+    symbol_count = symbol_data[symbol_number].instances; \
     mtf_queue_number = symbol_count - 2; \
     UpFreqMtfQueueNumD(cap_type); \
     if (mtf_queue_size[symbol_count] != MTF_QUEUE_SIZE) \
       mtf_queue[symbol_count][((mtf_queue_offset[symbol_count] + mtf_queue_size[symbol_count]++) & 0x3F)] = symbol_number; \
     else { \
-      mtf_queue_ptr = &mtf_queue[symbol_count][mtf_queue_offset[symbol_count]]; \
+      mtf_queue_ptr = &mtf_queue[symbol_count][mtf_queue_offset[symbol_count]++ & 0x3F]; \
       add_dictionary_symbol(*mtf_queue_ptr,CodeLength); \
       *mtf_queue_ptr = symbol_number; \
-      mtf_queue_offset[symbol_count] = (mtf_queue_offset[symbol_count] + 1) & 0x3F; \
     } \
   } \
 }
 
 
-#define get_long_symbol() \
-{ \
-  char index_bits = CodeLength - 12 - nbob_shift[FirstChar]; \
+#define get_long_symbol() { \
+  char index_bits = CodeLength - bin_bits_under_max[FirstChar]; \
   unsigned int msib = nbob[FirstChar][CodeLength] << index_bits; \
-  unsigned int reduce_bits = 0; \
   unsigned int shifted_max_symbols = msib >> 1; \
-  while (shifted_max_symbols >= nsob[FirstChar][CodeLength]) { \
-    reduce_bits++; \
-    shifted_max_symbols >>= 1; \
-  } \
-  if (index_bits > reduce_bits) { \
-    min_extra_reduce_index = (nsob[FirstChar][CodeLength] << 1) - (msib >> reduce_bits); \
-    DecodeDictionarySymbolIndex(index_bits-reduce_bits,fbob[FirstChar][CodeLength],sym_list_ptrs[FirstChar][CodeLength]); \
-  } \
-  else { \
-    SymbolIndex = BinNum - fbob[FirstChar][CodeLength]; \
-    unsigned int extra_code_bins = 0; \
-    if (SymbolIndex) { \
-      int index = SymbolIndex; \
-      if (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--index]] & 8) { \
-        extra_code_bins++; \
-        while (index && (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--index]] & 8)) \
+  unsigned int * sym_list_ptr = sym_list_ptrs[FirstChar][CodeLength]; \
+  if (shifted_max_symbols >= nsob[FirstChar][CodeLength]) { \
+    unsigned int reduce_bits = 1; \
+    while ((shifted_max_symbols >>= 1) >= nsob[FirstChar][CodeLength]) \
+      reduce_bits++; \
+    if (index_bits <= reduce_bits) { \
+      SymbolIndex = BinNum - fbob[FirstChar][CodeLength]; \
+      unsigned int extra_code_bins = 0; \
+      if (SymbolIndex) { \
+        int index = SymbolIndex; \
+        if (symbol_data[sym_list_ptr[--index]].type & 8) { \
           extra_code_bins++; \
+          while (index && (symbol_data[sym_list_ptr[--index]].type & 8)) \
+            extra_code_bins++; \
+        } \
+        low -= range * extra_code_bins; \
+        while (symbol_data[sym_list_ptr[SymbolIndex]].type & 8) { \
+          extra_code_bins++; \
+          SymbolIndex++; \
+        } \
+        range *= 1 + extra_code_bins; \
+        symbol_number = sym_list_ptr[SymbolIndex]; \
+      } \
+      else if ((FirstChar == end_symbol) && (CodeLength == max_code_length)) \
+        break; /* EOF */ \
+      else { \
+        if (symbol_data[sym_list_ptr[SymbolIndex]].type & 8) { \
+          while (symbol_data[sym_list_ptr[++SymbolIndex]].type & 8) \
+            extra_code_bins++; \
+          range *= 2 + extra_code_bins; \
+        } \
+        symbol_number = sym_list_ptr[SymbolIndex]; \
       } \
     } \
-    else if ((FirstChar == end_symbol) && (CodeLength == max_code_length)) \
-      break; /* EOF */ \
-    low -= range * extra_code_bins; \
-    while (symbol_type[sym_list_ptrs[FirstChar][CodeLength][SymbolIndex]] & 8) { \
-      extra_code_bins++; \
-      SymbolIndex++; \
+    else { \
+      index_bits -= reduce_bits; \
+      min_extra_reduce_index = (nsob[FirstChar][CodeLength] << 1) - (msib >> reduce_bits); \
+      DecodeDictionarySymbolIndex(index_bits,fbob[FirstChar][CodeLength],sym_list_ptr); \
     } \
-    range *= 1 + extra_code_bins; \
-    symbol_number = sym_list_ptrs[FirstChar][CodeLength][SymbolIndex]; \
+  } \
+  else { \
+    min_extra_reduce_index = (nsob[FirstChar][CodeLength] << 1) - msib; \
+    DecodeDictionarySymbolIndex(index_bits,fbob[FirstChar][CodeLength],sym_list_ptr); \
   } \
 }
 
 
-#define get_short_symbol() \
-{ \
+#define get_short_symbol() { \
   unsigned int extra_code_bins = 0; \
-  unsigned int index = (BinNum - fbob[FirstChar][CodeLength]) >> (12 + nbob_shift[FirstChar] - CodeLength); \
+  unsigned int index = (BinNum - fbob[FirstChar][CodeLength]) >> (bin_bits_under_max[FirstChar] - CodeLength); \
   int temp_index = index; \
-  while (temp_index && (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--temp_index]] & 8)) { \
+  if (temp_index && (symbol_data[sym_list_ptrs[FirstChar][CodeLength][--temp_index]].type & 8)) { \
     extra_code_bins++; \
+    while (temp_index && (symbol_data[sym_list_ptrs[FirstChar][CodeLength][--temp_index]].type & 8)) \
+      extra_code_bins++; \
+    low -= range * extra_code_bins; \
+    while (symbol_data[sym_list_ptrs[FirstChar][CodeLength][index]].type & 8) { \
+      index++; \
+      extra_code_bins++; \
+    } \
+    range *= 1 + extra_code_bins; \
   } \
-  low -= range * extra_code_bins; \
-  while (symbol_type[sym_list_ptrs[FirstChar][CodeLength][index]] & 8) { \
-    index++; \
+  else if (symbol_data[sym_list_ptrs[FirstChar][CodeLength][index]].type & 8) { \
     extra_code_bins++; \
+    while (symbol_data[sym_list_ptrs[FirstChar][CodeLength][++index]].type & 8) \
+      extra_code_bins++; \
+    range *= 1 + extra_code_bins; \
   } \
-  range *= 1 + extra_code_bins; \
   symbol_number = sym_list_ptrs[FirstChar][CodeLength][index]; \
 }
 
 
 void get_mtf_symbol() {
-  DecodeMtfQueueNum(NOT_CAP);
-  DecodeMtfQueuePos(NOT_CAP);
-  if (mtf_queue_number == 0) {
-    if (Symbol == 0) { // queue position 0
-      symbol_number = mtf_queue[2][(mtf_queue_offset[2] + mtf_queue_size[2] - 1) & 0x3F];
-      mtf_queue_size[2]--;
+  DecodeMtfQueueNumStart(NOT_CAP);
+  if (DecodeMtfQueueNumCheck0(NOT_CAP)) {
+    DecodeMtfQueueNumFinish0(NOT_CAP);
+    DecodeMtfQueuePosStart(NOT_CAP, 0);
+    if (DecodeMtfQueuePosCheck0(NOT_CAP, 0)) {
+      DecodeMtfQueuePosFinish0(NOT_CAP, 0);
+      symbol_number = mtf_queue[2][(mtf_queue_offset[2] + --mtf_queue_size[2]) & 0x3F];
     }
     else {
+      DecodeMtfQueuePosFinish(NOT_CAP, 0);
       unsigned int mtf_queue_last_position = (mtf_queue_offset[2] + --mtf_queue_size[2]) & 0x3F;
       unsigned int mtf_queue_position = (mtf_queue_last_position - Symbol) & 0x3F;
-      unsigned int *mtf_queue_ptr = &mtf_queue[2][0];
-      symbol_number = *(mtf_queue_ptr + mtf_queue_position);
+      symbol_number = *((mtf_queue_ptr = &mtf_queue[2][0]) + mtf_queue_position);
       do { // move the newer symbols up
         *(mtf_queue_ptr + mtf_queue_position) = *(mtf_queue_ptr + ((mtf_queue_position + 1) & 0x3F));
-        mtf_queue_position = (mtf_queue_position + 1) & 0x3F;
-      } while (mtf_queue_position != mtf_queue_last_position);
+      } while ((mtf_queue_position = (mtf_queue_position + 1) & 0x3F) != mtf_queue_last_position);
     }
   }
   else {
-    mtf_queue_number += 2;
-    if (Symbol == 0) { // queue position 0
+    DecodeMtfQueueNumFinish(NOT_CAP);
+    DecodeMtfQueuePosStart(NOT_CAP, mtf_queue_number);
+    if (DecodeMtfQueuePosCheck0(NOT_CAP, mtf_queue_number)) {
+      DecodeMtfQueuePosFinish0(NOT_CAP, mtf_queue_number);
+      mtf_queue_number += 2;
       symbol_number = mtf_queue[mtf_queue_number]
           [(mtf_queue_offset[mtf_queue_number] + mtf_queue_size[mtf_queue_number] - 1) & 0x3F];
       // decrement the mtf queue size if this is the last instance of this symbol
-      if (--symbols_remaining[symbol_number]) {
+      if (--symbol_data[symbol_number].remaining) {
         mtf_queue_number -= 2;
         UpFreqMtfQueueNumHitD(NOT_CAP);
       }
@@ -732,17 +872,18 @@ void get_mtf_symbol() {
         mtf_queue_size[mtf_queue_number]--;
     }
     else {
+      DecodeMtfQueuePosFinish(NOT_CAP, mtf_queue_number);
+      mtf_queue_number += 2;
       unsigned int mtf_queue_last_position
           = (mtf_queue_offset[mtf_queue_number] + mtf_queue_size[mtf_queue_number] - 1) & 0x3F;
       unsigned int mtf_queue_position = (mtf_queue_last_position - Symbol) & 0x3F;
       // remove this symbol from its current mtf queue position
-      unsigned int *mtf_queue_ptr = &mtf_queue[mtf_queue_number][0];
-      symbol_number = *(mtf_queue_ptr + mtf_queue_position);
+      symbol_number = *((mtf_queue_ptr = &mtf_queue[mtf_queue_number][0]) + mtf_queue_position);
       do { // move the newer symbols up
         *(mtf_queue_ptr + mtf_queue_position) = *(mtf_queue_ptr + ((mtf_queue_position + 1) & 0x3F));
         mtf_queue_position = (mtf_queue_position + 1) & 0x3F;
       } while (mtf_queue_position != mtf_queue_last_position);
-      if (--symbols_remaining[symbol_number]) { // put symbol on top of mtf queue
+      if (--symbol_data[symbol_number].remaining) { // put symbol on top of mtf queue
         *(mtf_queue_ptr + mtf_queue_position) = symbol_number;
         mtf_queue_number -= 2;
         UpFreqMtfQueueNumHitD(NOT_CAP);
@@ -755,14 +896,15 @@ void get_mtf_symbol() {
 
 
 void get_mtf_symbol_cap() {
-  DecodeMtfQueueNum(CAP);
-  DecodeMtfQueuePos(CAP);
-  if (mtf_queue_number == 0) {
-    if (Symbol == 0) { // queue position 0
-      num_az = 0;
-      mtf_queue_top_ptr = &mtf_queue[2][(mtf_queue_offset[2] + --mtf_queue_size[2]) & 0x3F];
-      mtf_queue_ptr = mtf_queue_top_ptr;
-      while ((symbol_type[*mtf_queue_ptr] & 2) == 0) {
+  DecodeMtfQueueNumStart(CAP);
+  if (DecodeMtfQueueNumCheck0(CAP)) {
+    DecodeMtfQueueNumFinish0(CAP);
+    DecodeMtfQueuePosStart(CAP, 0);
+    if (DecodeMtfQueuePosCheck0(CAP, 0)) {
+      DecodeMtfQueuePosFinish0(CAP, 0);
+      unsigned char num_az = 0;
+      mtf_queue_ptr = mtf_queue_top_ptr = &mtf_queue[2][(mtf_queue_offset[2] + --mtf_queue_size[2]) & 0x3F];
+      while ((symbol_data[*mtf_queue_ptr].type & 2) == 0) {
         if (mtf_queue_ptr-- == &mtf_queue[2][0])
           mtf_queue_ptr += MTF_QUEUE_SIZE;
       }
@@ -779,16 +921,16 @@ void get_mtf_symbol_cap() {
       }
     }
     else {
-      num_az = Symbol + 1;
-      mtf_queue_top_ptr = &mtf_queue[2][(mtf_queue_offset[2] + --mtf_queue_size[2]) & 0x3F];
+      DecodeMtfQueuePosFinish(CAP, 0);
+      unsigned char num_az = Symbol + 1;
+      mtf_queue_ptr = (mtf_queue_top_ptr = &mtf_queue[2][(mtf_queue_offset[2] + --mtf_queue_size[2]) & 0x3F]) + 1;
       // remove this symbol from its current mtf queue position
-      mtf_queue_ptr = mtf_queue_top_ptr + 1;
       do {
         if (mtf_queue_ptr != &mtf_queue[2][0])
           mtf_queue_ptr--;
         else
           mtf_queue_ptr += MTF_QUEUE_SIZE - 1;
-        if (symbol_type[*mtf_queue_ptr] & 2)
+        if (symbol_data[*mtf_queue_ptr].type & 2)
           num_az--;
       } while (num_az);
       symbol_number = *mtf_queue_ptr;
@@ -805,13 +947,15 @@ void get_mtf_symbol_cap() {
     }
   }
   else {
-    mtf_queue_number += 2;
-    if (Symbol == 0) { // queue position 0
-      num_az = 0;
-      mtf_queue_top_ptr = &mtf_queue[mtf_queue_number]
+    DecodeMtfQueueNumFinish(CAP);
+    DecodeMtfQueuePosStart(CAP, mtf_queue_number);
+    if (DecodeMtfQueuePosCheck0(CAP, mtf_queue_number)) {
+      DecodeMtfQueuePosFinish0(CAP, mtf_queue_number);
+      mtf_queue_number += 2;
+      unsigned char num_az = 0;
+      mtf_queue_ptr = mtf_queue_top_ptr = &mtf_queue[mtf_queue_number]
           [(mtf_queue_offset[mtf_queue_number] + mtf_queue_size[mtf_queue_number] - 1) & 0x3F];
-      mtf_queue_ptr = mtf_queue_top_ptr;
-      while ((symbol_type[*mtf_queue_ptr] & 2) == 0) {
+      while ((symbol_data[*mtf_queue_ptr].type & 2) == 0) {
         if (mtf_queue_ptr-- == &mtf_queue[mtf_queue_number][0])
           mtf_queue_ptr += MTF_QUEUE_SIZE;
       }
@@ -826,26 +970,20 @@ void get_mtf_symbol_cap() {
           mtf_queue_ptr -= MTF_QUEUE_SIZE - 1;
         }
       }
-      if (--symbols_remaining[symbol_number]) { // put symbol on top of mtf queue
-        *mtf_queue_ptr = symbol_number;
-        mtf_queue_number -= 2;
-        UpFreqMtfQueueNumHitD(CAP);
-      }
-      else // last instance - decrement the mtf queue size
-        mtf_queue_size[mtf_queue_number]--;
     }
     else {
-      mtf_queue_top_ptr = &mtf_queue[mtf_queue_number]
-          [(mtf_queue_offset[mtf_queue_number] + mtf_queue_size[mtf_queue_number] - 1) & 0x3F];
+      DecodeMtfQueuePosFinish(CAP, mtf_queue_number);
+      mtf_queue_number += 2;
+      mtf_queue_ptr = (mtf_queue_top_ptr = &mtf_queue[mtf_queue_number]
+          [(mtf_queue_offset[mtf_queue_number] + mtf_queue_size[mtf_queue_number] - 1) & 0x3F]) + 1;
       // remove this symbol from its current mtf queue position
-      num_az = Symbol + 1;
-      mtf_queue_ptr = mtf_queue_top_ptr + 1;
+      unsigned char num_az = Symbol + 1;
       do {
         if (mtf_queue_ptr != &mtf_queue[mtf_queue_number][0])
           mtf_queue_ptr--;
         else
           mtf_queue_ptr += MTF_QUEUE_SIZE - 1;
-        if (symbol_type[*mtf_queue_ptr] & 2)
+        if (symbol_data[*mtf_queue_ptr].type & 2)
           num_az--;
       } while (num_az);
 
@@ -860,41 +998,41 @@ void get_mtf_symbol_cap() {
           mtf_queue_ptr -= MTF_QUEUE_SIZE - 1;
         }
       } while (mtf_queue_ptr != mtf_queue_top_ptr);
-      if (--symbols_remaining[symbol_number]) { // put symbol on top of mtf queue
-        *mtf_queue_ptr = symbol_number;
-        mtf_queue_number -= 2;
-        UpFreqMtfQueueNumHitD(CAP);
-      }
-      else // last instance - decrement the mtf queue size
-        mtf_queue_size[mtf_queue_number]--;
     }
+    if (--symbol_data[symbol_number].remaining) { // put symbol on top of mtf queue
+      *mtf_queue_ptr = symbol_number;
+      mtf_queue_number -= 2;
+      UpFreqMtfQueueNumHitD(CAP);
+    }
+    else // last instance - decrement the mtf queue size
+      mtf_queue_size[mtf_queue_number]--;
   }
 }
 
 
 #define get_extra_length() { \
-    unsigned char temp_bits, data_bits = 0; \
-    unsigned int SymsInDef; \
+  unsigned char temp_bits, data_bits = 0; \
+  unsigned int SymsInDef; \
+  DecodeExtraLength(); \
+  while (Symbol == 3) { \
+    data_bits += 2; \
     DecodeExtraLength(); \
-    while (Symbol == 3) { \
-      data_bits += 2; \
-      DecodeExtraLength(); \
-    } \
-    if (Symbol == 2) { \
-      data_bits += 2; \
-      temp_bits = data_bits; \
-      SymsInDef = 0; \
-    } \
-    else { \
-      temp_bits = data_bits++; \
-      SymsInDef = Symbol; \
-    } \
-    while (temp_bits) { \
-      temp_bits -= 2; \
-      DecodeExtraLength(); \
-      SymsInDef = (SymsInDef << 2) + Symbol; \
-    } \
-    symbols_in_definition = SymsInDef + (1 << data_bits) + 14; \
+  } \
+  if (Symbol == 2) { \
+    data_bits += 2; \
+    temp_bits = data_bits; \
+    SymsInDef = 0; \
+  } \
+  else { \
+    temp_bits = data_bits++; \
+    SymsInDef = Symbol; \
+  } \
+  while (temp_bits) { \
+    temp_bits -= 2; \
+    DecodeExtraLength(); \
+    SymsInDef = (SymsInDef << 2) + Symbol; \
+  } \
+  symbols_in_definition = SymsInDef + (1 << data_bits) + 14; \
 }
 
 
@@ -935,114 +1073,215 @@ void get_mtf_symbol_cap() {
 
 unsigned char* decode_define(unsigned char* define_string) {
   unsigned char define_symbol_instances, define_symbol_code_length, *define_string_ptr, *end_define_string_ptr;
-  unsigned char nonergodic = 0;
   unsigned int symbols_in_definition;
 
   end_define_string_ptr = define_string;
 
-  DecodeSID(NOT_CAP);
-  symbols_in_definition = SIDSymbol + 1;
-  if (symbols_in_definition == 16) {
-    get_extra_length();
-  }
-  DecodeINST(NOT_CAP);
-  if (symbols_in_definition == 1) {
-    if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
-      define_symbol_instances = 0;
-      define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
-      if ((define_symbol_code_length > 10) && (use_mtf || (max_code_length >= 12))) {
-        DecodeERG();
+  DecodeSIDStart(NOT_CAP);
+  if (DecodeSIDCheck0(NOT_CAP)) {
+    DecodeSIDFinish0(NOT_CAP);
+    DecodeINSTStart(NOT_CAP);
+    if (DecodeINSTCheck0(NOT_CAP)) {
+      DecodeINSTFinish0(NOT_CAP);
+      define_symbol_instances = 2;
+      define_symbol_code_length = max_code_length;
+    }
+    else {
+      DecodeINSTFinish(NOT_CAP);
+      if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
+        define_symbol_instances = 0;
+        define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
       }
+      else if (Instances != MAX_INSTANCES_FOR_MTF_QUEUE - 1) {
+        define_symbol_instances = Instances + 2;
+        define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
+      }
+      else
+        define_symbol_instances = 1;
     }
-    else if (Instances != MAX_INSTANCES_FOR_MTF_QUEUE - 1) {
-      define_symbol_instances = Instances + 2;
-      define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
-    }
-    else
-      define_symbol_instances = 1;
-    DecodeBaseSymbol(base_bits);
 
+    DecodeBaseSymbol(base_bits);
     if (UTF8_compliant) {
       if (BaseSymbol < 0x80) {
         unsigned char j1 = 0x80;
         do {
-          if (RangeScaleFirstChar[j1]) {
+          if (RangeScaleFirstChar[0][j1]) {
             unsigned char j2 = 0x80;
-            while (SymbolFirstChar[j1][j2] != BaseSymbol)
+            while (SymbolFirstChar[0][j1][j2] != (unsigned char)BaseSymbol)
               j2--;
-            FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
-            if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
-              rescaleFirstChar(j1);
+            FreqFirstChar[0][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[0][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(0, j1);
+          }
+          if (RangeScaleFirstChar[1][j1]) {
+            unsigned char j2 = 0x80;
+            while (SymbolFirstChar[1][j1][j2] != (unsigned char)BaseSymbol)
+              j2--;
+            FreqFirstChar[1][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[1][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(1, j1);
+          }
+          if (RangeScaleFirstChar[2][j1]) {
+            unsigned char j2 = 0x80;
+            while (SymbolFirstChar[2][j1][j2] != (unsigned char)BaseSymbol)
+              j2--;
+            FreqFirstChar[2][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[2][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(2, j1);
+          }
+          if (RangeScaleFirstChar[3][j1]) {
+            unsigned char j2 = 0x80;
+            while (SymbolFirstChar[3][j1][j2] != (unsigned char)BaseSymbol)
+              j2--;
+            FreqFirstChar[3][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[3][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(3, j1);
           }
         } while (j1--);
         j1 = 0x80;
         do {
-          SymbolFirstChar[BaseSymbol][j1] = j1;
-          if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
-            FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          SymbolFirstChar[0][BaseSymbol][j1] = j1;
+          SymbolFirstChar[1][BaseSymbol][j1] = j1;
+          SymbolFirstChar[2][BaseSymbol][j1] = j1;
+          SymbolFirstChar[3][BaseSymbol][j1] = j1;
+          if (RangeScaleFirstChar[0][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[0][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[1][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[1][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[2][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[2][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[3][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[3][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][BaseSymbol] += UP_FREQ_FIRST_CHAR;
           }
         } while (j1--);
       }
-      else if (RangeScaleFirstChar[0x80] == 0) {
+      else if (RangeScaleFirstChar[0][0x80] == 0) {
         unsigned char j1 = 0x7F;
         do {
-          if (RangeScaleFirstChar[j1]) {
-            FreqFirstChar[j1][0x80] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
-            if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
-              rescaleFirstChar(j1);
+          if (RangeScaleFirstChar[0][j1]) {
+            FreqFirstChar[0][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[0][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(0, j1);
+          }
+          if (RangeScaleFirstChar[1][j1]) {
+            FreqFirstChar[1][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[1][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(1, j1);
+          }
+          if (RangeScaleFirstChar[2][j1]) {
+            FreqFirstChar[2][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[2][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(2, j1);
+          }
+          if (RangeScaleFirstChar[3][j1]) {
+            FreqFirstChar[3][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[3][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(3, j1);
           }
         } while (j1--);
         j1 = 0x80;
         do {
-          SymbolFirstChar[0x80][j1] = j1;
-          if (RangeScaleFirstChar[j1]) {
-            FreqFirstChar[0x80][j1] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[0x80] += UP_FREQ_FIRST_CHAR;
+          SymbolFirstChar[0][0x80][j1] = j1;
+          SymbolFirstChar[1][0x80][j1] = j1;
+          SymbolFirstChar[2][0x80][j1] = j1;
+          SymbolFirstChar[3][0x80][j1] = j1;
+          if (RangeScaleFirstChar[0][j1]) {
+            FreqFirstChar[0][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][0x80] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[1][j1]) {
+            FreqFirstChar[1][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][0x80] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[2][j1]) {
+            FreqFirstChar[2][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][0x80] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[3][j1]) {
+            FreqFirstChar[3][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][0x80] += UP_FREQ_FIRST_CHAR;
           }
         } while (j1--);
-        FreqFirstChar[0x80][0x80] = UP_FREQ_FIRST_CHAR;
-        RangeScaleFirstChar[0x80] += UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[0][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[1][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[2][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[3][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[0][0x80] += UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[1][0x80] += UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[2][0x80] += UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[3][0x80] += UP_FREQ_FIRST_CHAR;
+      }
+      if (BaseSymbol < START_UTF8_2BYTE_symbols) {
+        symbol_data[num_symbols_defined].starts = symbol_data[num_symbols_defined].ends = prior_end = (unsigned char)BaseSymbol;
+        *end_define_string_ptr++ = prior_end;
+      }
+      else {
+        symbol_data[num_symbols_defined].starts = symbol_data[num_symbols_defined].ends = prior_end = 0x80;
+        if (BaseSymbol < START_UTF8_3BYTE_symbols) {
+          *end_define_string_ptr++ = (unsigned char)(BaseSymbol >> 6) + 0xC0;
+          *end_define_string_ptr++ = (unsigned char)(BaseSymbol & 0x3F) + 0x80;
+        }
+        else if (BaseSymbol < START_UTF8_4BYTE_symbols) {
+          *end_define_string_ptr++ = (unsigned char)(BaseSymbol >> 12) + 0xE0;
+          *end_define_string_ptr++ = (unsigned char)((BaseSymbol >> 6) & 0x3F) + 0x80;
+          *end_define_string_ptr++ = (unsigned char)(BaseSymbol & 0x3F) + 0x80;
+        }
+        else {
+          *end_define_string_ptr++ = (unsigned char)(BaseSymbol >> 18) + 0xF0;
+          *end_define_string_ptr++ = (unsigned char)((BaseSymbol >> 12) & 0x3F) + 0x80;
+          *end_define_string_ptr++ = (unsigned char)((BaseSymbol >> 6) & 0x3F) + 0x80;
+          *end_define_string_ptr++ = (unsigned char)(BaseSymbol & 0x3F) + 0x80;
+        }
       }
     }
     else {
       unsigned char j1 = 0xFF;
       do {
-        if (RangeScaleFirstChar[j1]) {
-          unsigned char j2 = 0xFF;
-          while (SymbolFirstChar[j1][j2] != BaseSymbol)
-            j2--;
-          FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
-          RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
-          if (j2 < 0x80) {
+        if (RangeScaleFirstChar[0][j1]) {
+          FreqFirstCharBinary[j1][BaseSymbol] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[0][j1] += UP_FREQ_FIRST_CHAR;
+          if (BaseSymbol < 0x80) {
             RangeScaleFirstCharSection[j1][3] += UP_FREQ_FIRST_CHAR;
-            if (j2 < 0x40) {
+            if (BaseSymbol < 0x40) {
               RangeScaleFirstCharSection[j1][1] += UP_FREQ_FIRST_CHAR;
-              if (j2 < 0x20)
+              if (BaseSymbol < 0x20)
                 RangeScaleFirstCharSection[j1][0] += UP_FREQ_FIRST_CHAR;
             }
-            else if (j2 < 0x60)
+            else if (BaseSymbol < 0x60)
               RangeScaleFirstCharSection[j1][2] += UP_FREQ_FIRST_CHAR;
           }
-          else if (j2 < 0xC0) {
+          else if (BaseSymbol < 0xC0) {
             RangeScaleFirstCharSection[j1][5] += UP_FREQ_FIRST_CHAR;
-            if (j2 < 0xA0)
+            if (BaseSymbol < 0xA0)
               RangeScaleFirstCharSection[j1][4] += UP_FREQ_FIRST_CHAR;
           }
-          else if (j2 < 0xE0)
+          else if (BaseSymbol < 0xE0)
             RangeScaleFirstCharSection[j1][6] += UP_FREQ_FIRST_CHAR;
-          if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
+          if (RangeScaleFirstChar[0][j1] > FREQ_FIRST_CHAR_BOT)
             rescaleFirstCharBinary(j1);
         }
       } while (j1--);
       j1 = 0xFF;
       do {
-        SymbolFirstChar[BaseSymbol][j1] = j1;
-        if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
-          FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
-          RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+        SymbolFirstChar[0][BaseSymbol][j1] = j1;
+        if (RangeScaleFirstChar[0][j1] || (j1 == BaseSymbol)) {
+          FreqFirstCharBinary[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[0][BaseSymbol] += UP_FREQ_FIRST_CHAR;
           if (j1 < 0x80) {
             RangeScaleFirstCharSection[BaseSymbol][3] += UP_FREQ_FIRST_CHAR;
             if (j1 < 0x40) {
@@ -1062,156 +1301,134 @@ unsigned char* decode_define(unsigned char* define_string) {
             RangeScaleFirstCharSection[BaseSymbol][6] += UP_FREQ_FIRST_CHAR;
         }
       } while (j1--);
+      symbol_data[num_symbols_defined].starts = symbol_data[num_symbols_defined].ends = prior_end = (unsigned char)BaseSymbol;
+      *end_define_string_ptr++ = prior_end;
     }
 
-    if (BaseSymbol < START_UTF8_2BYTE_symbols) {
-      starts[num_symbols_defined] = BaseSymbol;
-      ends[num_symbols_defined] = BaseSymbol;
-      *end_define_string_ptr++ = (unsigned char)BaseSymbol;
-    }
-    else {
-      if (UTF8_compliant) {
-        starts[num_symbols_defined] = 0x80;
-        ends[num_symbols_defined] = 0x80;
-        if (BaseSymbol < START_UTF8_3BYTE_symbols) {
-          *end_define_string_ptr++ = (unsigned char)(BaseSymbol >> 6) + 0xC0;
-          *end_define_string_ptr++ = (unsigned char)(BaseSymbol & 0x3F) + 0x80;
-        }
-        else if (BaseSymbol < START_UTF8_4BYTE_symbols) {
-          *end_define_string_ptr++ = (unsigned char)(BaseSymbol >> 12) + 0xE0;
-          *end_define_string_ptr++ = (unsigned char)((BaseSymbol >> 6) & 0x3F) + 0x80;
-          *end_define_string_ptr++ = (unsigned char)(BaseSymbol & 0x3F) + 0x80;
-        }
-        else {
-          *end_define_string_ptr++ = (unsigned char)(BaseSymbol >> 18) + 0xF0;
-          *end_define_string_ptr++ = (unsigned char)((BaseSymbol >> 12) & 0x3F) + 0x80;
-          *end_define_string_ptr++ = (unsigned char)((BaseSymbol >> 6) & 0x3F) + 0x80;
-          *end_define_string_ptr++ = (unsigned char)(BaseSymbol & 0x3F) + 0x80;
-        }
-      }
-      else {
-        starts[num_symbols_defined] = BaseSymbol;
-        ends[num_symbols_defined] = BaseSymbol;
-        *end_define_string_ptr++ = (unsigned char)BaseSymbol;
-      }
-    }
-    prior_end = BaseSymbol;
-    if (UTF8_compliant && (prior_end > 0x80))
-      prior_end = 0x80;
-    if (found_first_symbol == 0) {
-      found_first_symbol = 1;
+    if (find_first_symbol) {
+      find_first_symbol = 0;
       end_symbol = prior_end;
-      if (sym_list_ptrs[end_symbol][max_code_length] == 0)
-        sym_list_ptrs[end_symbol][max_code_length] = (unsigned int *)malloc(sizeof(unsigned int) * INITIAL_LIST_SIZE);
-      sym_list_ptrs[end_symbol][max_code_length][0] = MAX_SYMBOLS_DEFINED - 1;
-      nsob[end_symbol][max_code_length] = 1;
-      nbob[end_symbol][max_code_length] = 1;
+      sym_list_ptrs[prior_end][max_code_length][0] = MAX_SYMBOLS_DEFINED - 1;
+      nsob[prior_end][max_code_length] = 1;
       if (max_code_length >= 12) {
-        nbob_shift[end_symbol] = max_code_length - 12;
-        nbob[end_symbol][max_code_length] = 1;
-        sum_nbob[end_symbol] = 1;
+        bin_bits_under_max[prior_end] = max_code_length;
+        sum_nbob[prior_end] = nbob[prior_end][max_code_length] = 1;
       }
-      else {
-        nbob[end_symbol][max_code_length] = 1 << (12 - max_code_length);
-        sum_nbob[end_symbol] = 1 << (12 - max_code_length);
-      }
+      else
+        sum_nbob[prior_end] = nbob[prior_end][max_code_length] = 1 << (12 - max_code_length);
     }
     if (define_symbol_instances == 1) {
-      symbol_string_ptr = symbol_strings + symbol_string_indexes[num_symbols_defined];
+      symbol_number = num_symbols_defined;
+      symbol_string_ptr = symbol_strings + symbol_data[num_symbols_defined].string_index;
       define_string_ptr = define_string;
       while (define_string_ptr != end_define_string_ptr)
         *symbol_string_ptr++ = *define_string_ptr++;
-      symbol_string_indexes[++num_symbols_defined] = symbol_string_ptr - symbol_strings;
+      symbol_data[++num_symbols_defined].string_index = symbol_string_ptr - symbol_strings;
       return(end_define_string_ptr);
     }
   }
   else {
-    if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
-      define_symbol_instances = 0;
-      define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
-      if ((define_symbol_code_length > 10) && (use_mtf || (max_code_length >= 12))) {
-        DecodeERG();
-      }
+    DecodeSIDFinish(NOT_CAP);
+    symbols_in_definition = SIDSymbol + 1;
+    if (symbols_in_definition == 16) {
+      get_extra_length();
+    }
+    DecodeINSTStart(NOT_CAP);
+    if (DecodeINSTCheck0(NOT_CAP)) {
+      DecodeINSTFinish0(NOT_CAP);
+      define_symbol_instances = 2;
+      define_symbol_code_length = max_code_length;
     }
     else {
-      define_symbol_instances = Instances + 2;
-      define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
+      DecodeINSTFinish(NOT_CAP);
+      if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
+        define_symbol_instances = 0;
+        define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
+      }
+      else {
+        define_symbol_instances = Instances + 2;
+        define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
+      }
     }
 
     do { // Build the symbol string from the next symbols_in_definition symbols
-      DecodeSymType(LEVEL1);
-      if (Symbol != 1) {
-        if (Symbol != 0) {
-          if (Symbol == 2) {
-            get_mtfg_symbol();
-          }
-          else {
-            get_mtf_symbol();
-          }
+      DecodeSymTypeStart(LEVEL1);
+      if (DecodeSymTypeCheckType0(LEVEL1)) {
+        DecodeSymTypeFinishType0(LEVEL1);
+        if (UTF8_compliant) {
+          DecodeFirstChar(0, prior_end);
         }
         else {
-          if (UTF8_compliant) {
-            DecodeFirstChar(prior_end);
+          DecodeFirstCharBinary(prior_end);
+        }
+        DictionaryBins = sum_nbob[FirstChar];
+        DecodeDictionaryBin(lookup_bits[FirstChar]);
+        if (CodeLength > bin_bits_under_max[FirstChar]) {
+          get_long_symbol();
+        }
+        else {
+          get_short_symbol();
+        }
+        if (symbol_data[symbol_number].instances <= MAX_INSTANCES_FOR_MTF_QUEUE) {
+          if (use_mtf) {
+            insert_mtf_queue(NOT_CAP);
           }
-          else {
-            DecodeFirstCharBinary(prior_end);
-          }
-          DictionaryBins = sum_nbob[FirstChar];
-          DecodeDictionaryBin(lookup_bits[FirstChar]);
-          if (CodeLength > 12 + nbob_shift[FirstChar]) {
-            get_long_symbol();
-          }
-          else {
-            get_short_symbol();
-          }
-          if (symbol_instances[symbol_number] <= 20) {
-            if (use_mtf) {
-              insert_mtf_queue(NOT_CAP);
-            }
-            else if (--symbols_remaining[symbol_number] == 0) {
-              remove_dictionary_symbol(symbol_number,CodeLength);
-            }
-          }
-          else if (symbol_type[symbol_number] & 4) {
-            add_new_symbol_to_mtfg_queue(symbol_number);
+          else if (--symbol_data[symbol_number].remaining == 0) {
+            remove_dictionary_symbol(symbol_number,CodeLength);
           }
         }
-        prior_end = ends[symbol_number];
-        symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol_number];
-        next_string_ptr = symbol_strings + symbol_string_indexes[symbol_number + 1];
-        symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol_number];
+        else if (symbol_data[symbol_number].type & 4) {
+          add_new_symbol_to_mtfg_queue(symbol_number);
+        }
+        prior_end = symbol_data[symbol_number].ends;
+        symbol_string_ptr = symbol_strings + symbol_data[symbol_number].string_index;
+        next_string_ptr = symbol_strings + symbol_data[symbol_number + 1].string_index;
         while (symbol_string_ptr != next_string_ptr)
           *end_define_string_ptr++ = *symbol_string_ptr++;
       }
-      else {
+      else if (DecodeSymTypeCheckType1(LEVEL1)) {
+        DecodeSymTypeFinishType1(LEVEL1);
         end_define_string_ptr = decode_define(end_define_string_ptr);
+      }
+      else {
+        if (DecodeSymTypeCheckType2(LEVEL1)) {
+          DecodeSymTypeFinishType2(LEVEL1);
+          get_mtfg_symbol();
+        }
+        else {
+          DecodeSymTypeFinishType3(LEVEL1);
+          get_mtf_symbol();
+        }
+        prior_end = symbol_data[symbol_number].ends;
+        symbol_string_ptr = symbol_strings + symbol_data[symbol_number].string_index;
+        next_string_ptr = symbol_strings + symbol_data[symbol_number + 1].string_index;
+        while (symbol_string_ptr != next_string_ptr)
+          *end_define_string_ptr++ = *symbol_string_ptr++;
       }
     } while (--symbols_in_definition);
     if (*define_string < 0x80)
-      starts[num_symbols_defined] = *define_string;
+      symbol_data[num_symbols_defined].starts = *define_string;
     else if (UTF8_compliant)
-      starts[num_symbols_defined] = 0x80;
+      symbol_data[num_symbols_defined].starts = 0x80;
     else
-      starts[num_symbols_defined] = *define_string;
-    ends[num_symbols_defined] = prior_end;
+      symbol_data[num_symbols_defined].starts = *define_string;
+    symbol_data[num_symbols_defined].ends = prior_end;
   }
 
   if (define_symbol_instances) { // mtf queue symbol
     if (define_symbol_instances == 2) {
-      symbol_instances[num_symbols_defined] = 2;
-      symbols_remaining[num_symbols_defined] = 1;
+      symbol_data[num_symbols_defined].instances = 2;
+      symbol_data[num_symbols_defined].remaining = 1;
       if (use_mtf) {
-        mtf_queue_number = 0;
+        mtf_queue_number = 0; // WHY SET THIS? !!!
         UpFreqMtfQueueNumD(NOT_CAP);
         if (mtf_queue_size[2] != MTF_QUEUE_SIZE) // put the symbol in the mtf queue
           mtf_queue[2][(mtf_queue_size[2]++ + mtf_queue_offset[2]) & 0x3F] = num_symbols_defined;
         else { // put last mtf queue symbol in symbol list
-          mtf_queue_ptr = &mtf_queue[2][mtf_queue_offset[2]];
-          symbol_number = *mtf_queue_ptr;
+          symbol_number = *(mtf_queue_ptr = &mtf_queue[2][mtf_queue_offset[2]++ & 0x3F]);
           add_dictionary_symbol(symbol_number,define_symbol_code_length);
           // put symbol in queue and rotate cyclical buffer
           *mtf_queue_ptr = num_symbols_defined;
-          mtf_queue_offset[2] = (mtf_queue_offset[2] + 1) & 0x3F;
         }
       }
       else {
@@ -1219,8 +1436,8 @@ unsigned char* decode_define(unsigned char* define_string) {
       }
     }
     else {
-      symbol_instances[num_symbols_defined] = define_symbol_instances;
-      symbols_remaining[num_symbols_defined] = define_symbol_instances - 1;
+      symbol_data[num_symbols_defined].instances = define_symbol_instances;
+      symbol_data[num_symbols_defined].remaining = define_symbol_instances - 1;
       if (use_mtf) {
         mtf_queue_number = define_symbol_instances - 2;
         UpFreqMtfQueueNumD(NOT_CAP);
@@ -1229,12 +1446,11 @@ unsigned char* decode_define(unsigned char* define_string) {
                 [(mtf_queue_size[define_symbol_instances]++ + mtf_queue_offset[define_symbol_instances]) & 0x3F]
               = num_symbols_defined;
         else { // put last mtf queue symbol in symbol list
-          mtf_queue_ptr = &mtf_queue[define_symbol_instances][mtf_queue_offset[define_symbol_instances]];
-          symbol_number = *mtf_queue_ptr;
+          symbol_number
+              = *(mtf_queue_ptr = &mtf_queue[define_symbol_instances][mtf_queue_offset[define_symbol_instances]++ & 0x3F]);
           add_dictionary_symbol(symbol_number,define_symbol_code_length);
           // put symbol in queue and rotate cyclical buffer
           *mtf_queue_ptr = num_symbols_defined;
-          mtf_queue_offset[define_symbol_instances] = (mtf_queue_offset[define_symbol_instances] + 1) & 0x3F;
         }
       }
       else {
@@ -1243,154 +1459,269 @@ unsigned char* decode_define(unsigned char* define_string) {
     }
   }
   else { // put symbol in table
-    symbol_type[num_symbols_defined] = nonergodic << 2;
-    if (nonergodic) {
-      add_new_symbol_to_mtfg_queue(num_symbols_defined);
+    if ((define_symbol_code_length > 10) && use_mtf) {
+      unsigned char nonergodic;
+      DecodeERG(0);
+      if (nonergodic) {
+        symbol_data[num_symbols_defined].type = 4;
+        add_new_symbol_to_mtfg_queue(num_symbols_defined);
+      }
     }
-    symbol_instances[num_symbols_defined] = define_symbol_code_length + 20;
+    symbol_data[num_symbols_defined].instances = MAX_INSTANCES_FOR_MTF_QUEUE + define_symbol_code_length;
     add_dictionary_symbol(num_symbols_defined,define_symbol_code_length);
   }
-  symbol_string_ptr = symbol_strings + symbol_string_indexes[num_symbols_defined];
+  symbol_number = num_symbols_defined;
+  symbol_string_ptr = symbol_strings + symbol_data[num_symbols_defined].string_index;
   define_string_ptr = define_string;
   copy_string(define_string_ptr, end_define_string_ptr, symbol_string_ptr);
-  symbol_string_indexes[++num_symbols_defined] = symbol_string_ptr - symbol_strings;
+  symbol_data[++num_symbols_defined].string_index = symbol_string_ptr - symbol_strings;
   return(end_define_string_ptr);
 }
 
 
-unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned char first_symbol_in_string) {
+unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned char first_char_needs_cap) {
   unsigned char define_symbol_instances, define_symbol_code_length, *define_string_ptr, *end_define_string_ptr;
-  unsigned char char_before_define_is_cap, first_symbol;
-  unsigned char nonergodic = 0;
+  unsigned char char_before_define_is_cap;
   unsigned int symbols_in_definition;
+  unsigned char tag_type = 0;
 
   char_before_define_is_cap = prior_is_cap;
   caps_on = 0;
   end_define_string_ptr = define_string;
 
-  if (prior_is_cap == 0) {
-    DecodeSID(NOT_CAP);
-  }
-  else {
-    DecodeSID(CAP);
-  }
-  symbols_in_definition = SIDSymbol + 1;
-  if (symbols_in_definition == 16) {
-    get_extra_length();
-  }
-  if (prior_is_cap == 0) {
-    DecodeINST(NOT_CAP);
-  }
-  else {
-    DecodeINST(CAP);
-  }
-
-  if (symbols_in_definition == 1) {
-    if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
-      define_symbol_instances = 0;
-      define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
-      if ((define_symbol_code_length > 10) && (use_mtf || (max_code_length >= 12))) {
-        DecodeERG();
+  DecodeSIDStart(prior_is_cap);
+  if (DecodeSIDCheck0(prior_is_cap)) {
+    DecodeSIDFinish0(prior_is_cap);
+    DecodeINSTStart(prior_is_cap);
+    if (DecodeINSTCheck0(prior_is_cap)) {
+      DecodeINSTFinish0(prior_is_cap);
+      define_symbol_instances = 2;
+      define_symbol_code_length = max_code_length;
+    }
+    else {
+      DecodeINSTFinish(prior_is_cap);
+      if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
+        define_symbol_instances = 0;
+        define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
       }
+      else if (Instances != MAX_INSTANCES_FOR_MTF_QUEUE - 1) {
+        define_symbol_instances = Instances + 2;
+        define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
+      }
+      else
+        define_symbol_instances = 1;
     }
-    else if (Instances != MAX_INSTANCES_FOR_MTF_QUEUE - 1) {
-      define_symbol_instances = Instances + 2;
-      define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
-    }
-    else
-      define_symbol_instances = 1;
-    DecodeBaseSymbol(base_bits);
 
+    DecodeBaseSymbol(base_bits);
     if (UTF8_compliant) {
       if (BaseSymbol < 0x80) {
         unsigned char j1 = 0x80;
         do {
-          if (RangeScaleFirstChar[j1]) {
+          if (RangeScaleFirstChar[0][j1]) {
             unsigned char j2 = 0x80;
-            while (SymbolFirstChar[j1][j2] != BaseSymbol)
+            while (SymbolFirstChar[0][j1][j2] != (unsigned char)BaseSymbol)
               j2--;
-            FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
-            if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
-              rescaleFirstChar(j1);
+            FreqFirstChar[0][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[0][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(0, j1);
+          }
+          if (RangeScaleFirstChar[1][j1]) {
+            unsigned char j2 = 0x80;
+            while (SymbolFirstChar[1][j1][j2] != (unsigned char)BaseSymbol)
+              j2--;
+            FreqFirstChar[1][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[1][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(1, j1);
+          }
+          if (RangeScaleFirstChar[2][j1]) {
+            unsigned char j2 = 0x80;
+            while (SymbolFirstChar[2][j1][j2] != (unsigned char)BaseSymbol)
+              j2--;
+            FreqFirstChar[2][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[2][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(2, j1);
+          }
+          if (RangeScaleFirstChar[3][j1]) {
+            unsigned char j2 = 0x80;
+            while (SymbolFirstChar[3][j1][j2] != (unsigned char)BaseSymbol)
+              j2--;
+            FreqFirstChar[3][j1][j2] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[3][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(3, j1);
           }
         } while (j1--);
         j1 = 0x80;
         do {
-          SymbolFirstChar[BaseSymbol][j1] = j1;
-          if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
-            FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          SymbolFirstChar[0][BaseSymbol][j1] = j1;
+          SymbolFirstChar[1][BaseSymbol][j1] = j1;
+          SymbolFirstChar[2][BaseSymbol][j1] = j1;
+          SymbolFirstChar[3][BaseSymbol][j1] = j1;
+          if (RangeScaleFirstChar[0][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[0][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[1][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[1][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[2][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[2][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[3][j1] || (j1 == BaseSymbol)) {
+            FreqFirstChar[3][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][BaseSymbol] += UP_FREQ_FIRST_CHAR;
           }
         } while (j1--);
       }
-      else if (RangeScaleFirstChar[0x80] == 0) {
+      else if (RangeScaleFirstChar[0][0x80] == 0) {
         unsigned char j1 = 0x7F;
         do {
-          if (RangeScaleFirstChar[j1]) {
-            FreqFirstChar[j1][0x80] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
-            if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
-              rescaleFirstChar(j1);
+          if (RangeScaleFirstChar[0][j1]) {
+            FreqFirstChar[0][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[0][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(0, j1);
+          }
+          if (RangeScaleFirstChar[1][j1]) {
+            FreqFirstChar[1][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[1][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(1, j1);
+          }
+          if (RangeScaleFirstChar[2][j1]) {
+            FreqFirstChar[2][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[2][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(2, j1);
+          }
+          if (RangeScaleFirstChar[3][j1]) {
+            FreqFirstChar[3][j1][0x80] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][j1] += UP_FREQ_FIRST_CHAR;
+            if (RangeScaleFirstChar[3][j1] > FREQ_FIRST_CHAR_BOT)
+              rescaleFirstChar(3, j1);
           }
         } while (j1--);
         j1 = 0x80;
         do {
-          SymbolFirstChar[0x80][j1] = j1;
-          if (RangeScaleFirstChar[j1]) {
-            FreqFirstChar[0x80][j1] = UP_FREQ_FIRST_CHAR;
-            RangeScaleFirstChar[0x80] += UP_FREQ_FIRST_CHAR;
+          SymbolFirstChar[0][0x80][j1] = j1;
+          SymbolFirstChar[1][0x80][j1] = j1;
+          SymbolFirstChar[2][0x80][j1] = j1;
+          SymbolFirstChar[3][0x80][j1] = j1;
+          if (RangeScaleFirstChar[0][j1]) {
+            FreqFirstChar[0][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[0][0x80] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[1][j1]) {
+            FreqFirstChar[1][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[1][0x80] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[2][j1]) {
+            FreqFirstChar[2][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[2][0x80] += UP_FREQ_FIRST_CHAR;
+          }
+          if (RangeScaleFirstChar[3][j1]) {
+            FreqFirstChar[3][0x80][j1] = UP_FREQ_FIRST_CHAR;
+            RangeScaleFirstChar[3][0x80] += UP_FREQ_FIRST_CHAR;
           }
         } while (j1--);
-        FreqFirstChar[0x80][0x80] = UP_FREQ_FIRST_CHAR;
-        RangeScaleFirstChar[0x80] += UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[0][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[1][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[2][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        FreqFirstChar[3][0x80][0x80] = UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[0][0x80] += UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[1][0x80] += UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[2][0x80] += UP_FREQ_FIRST_CHAR;
+        RangeScaleFirstChar[3][0x80] += UP_FREQ_FIRST_CHAR;
       }
     }
     else {
       unsigned char j1 = 0xFF;
       do {
-        if (RangeScaleFirstChar[j1]) {
+        if (RangeScaleFirstChar[0][j1]) {
           unsigned char j2 = 0xFF;
-          while (SymbolFirstChar[j1][j2] != BaseSymbol)
+          while (SymbolFirstChar[0][j1][j2] != (unsigned char)BaseSymbol)
             j2--;
-          FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
-          RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
-          if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
-            rescaleFirstChar(j1);
+          FreqFirstChar[0][j1][j2] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[0][j1] += UP_FREQ_FIRST_CHAR;
+          if (RangeScaleFirstChar[0][j1] > FREQ_FIRST_CHAR_BOT)
+            rescaleFirstChar(0, j1);
+        }
+        if (RangeScaleFirstChar[1][j1]) {
+          unsigned char j2 = 0xFF;
+          while (SymbolFirstChar[1][j1][j2] != (unsigned char)BaseSymbol)
+            j2--;
+          FreqFirstChar[1][j1][j2] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[1][j1] += UP_FREQ_FIRST_CHAR;
+          if (RangeScaleFirstChar[1][j1] > FREQ_FIRST_CHAR_BOT)
+            rescaleFirstChar(1, j1);
+        }
+        if (RangeScaleFirstChar[2][j1]) {
+          unsigned char j2 = 0xFF;
+          while (SymbolFirstChar[2][j1][j2] != (unsigned char)BaseSymbol)
+            j2--;
+          FreqFirstChar[2][j1][j2] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[2][j1] += UP_FREQ_FIRST_CHAR;
+          if (RangeScaleFirstChar[2][j1] > FREQ_FIRST_CHAR_BOT)
+            rescaleFirstChar(2, j1);
+        }
+        if (RangeScaleFirstChar[3][j1]) {
+          unsigned char j2 = 0xFF;
+          while (SymbolFirstChar[3][j1][j2] != (unsigned char)BaseSymbol)
+            j2--;
+          FreqFirstChar[3][j1][j2] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[3][j1] += UP_FREQ_FIRST_CHAR;
+          if (RangeScaleFirstChar[3][j1] > FREQ_FIRST_CHAR_BOT)
+            rescaleFirstChar(3, j1);
         }
       } while (j1--);
       j1 = 0xFF;
       do {
-        SymbolFirstChar[BaseSymbol][j1] = j1;
-        if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
-          FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
-          RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+        SymbolFirstChar[0][BaseSymbol][j1] = j1;
+        SymbolFirstChar[1][BaseSymbol][j1] = j1;
+        SymbolFirstChar[2][BaseSymbol][j1] = j1;
+        SymbolFirstChar[3][BaseSymbol][j1] = j1;
+        if (RangeScaleFirstChar[0][j1] || (j1 == BaseSymbol)) {
+          FreqFirstChar[0][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[0][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+        }
+        if (RangeScaleFirstChar[1][j1] || (j1 == BaseSymbol)) {
+          FreqFirstChar[1][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[1][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+        }
+        if (RangeScaleFirstChar[2][j1] || (j1 == BaseSymbol)) {
+          FreqFirstChar[2][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[2][BaseSymbol] += UP_FREQ_FIRST_CHAR;
+        }
+        if (RangeScaleFirstChar[3][j1] || (j1 == BaseSymbol)) {
+          FreqFirstChar[3][BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
+          RangeScaleFirstChar[3][BaseSymbol] += UP_FREQ_FIRST_CHAR;
         }
       } while (j1--);
     }
 
     if (BaseSymbol < START_UTF8_2BYTE_symbols) {
-      starts[num_symbols_defined] = BaseSymbol;
-      ends[num_symbols_defined] = BaseSymbol;
-      if ((unsigned char)BaseSymbol == CAP_CHAR) {
-        symbol_type[num_symbols_defined] = (nonergodic << 2) + 1;
+      symbol_data[num_symbols_defined].starts = symbol_data[num_symbols_defined].ends = (unsigned char)BaseSymbol;
+      if (BaseSymbol == CAP_CHAR) {
+        symbol_data[num_symbols_defined].type = 1;
         caps_on = 1;
         prior_is_cap = 1;
       }
       else {
-        symbol_type[num_symbols_defined] = (nonergodic << 2) + (((BaseSymbol >= 0x61) && (BaseSymbol <= 0x7A)) << 1);
-        *end_define_string_ptr++ = (unsigned char)BaseSymbol - 0x20 * caps_on;
-        caps_on = 0;
+        symbol_data[num_symbols_defined].type = ((BaseSymbol >= 0x61) && (BaseSymbol <= 0x7A)) << 1;
+        *end_define_string_ptr++ = (unsigned char)BaseSymbol;
         prior_is_cap = 0;
       }
     }
     else {
-      symbol_type[num_symbols_defined] = nonergodic << 2;
-      caps_on = 0;
+      symbol_data[num_symbols_defined].type = 0;
       prior_is_cap = 0;
       if (UTF8_compliant) {
-        starts[num_symbols_defined] = 0x80;
-        ends[num_symbols_defined] = 0x80;
+        symbol_data[num_symbols_defined].starts = symbol_data[num_symbols_defined].ends = 0x80;
         if (BaseSymbol < START_UTF8_3BYTE_symbols) {
           *end_define_string_ptr++ = (unsigned char)(BaseSymbol >> 6) + 0xC0;
           *end_define_string_ptr++ = (unsigned char)(BaseSymbol & 0x3F) + 0x80;
@@ -1408,170 +1739,274 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
         }
       }
       else {
-        starts[num_symbols_defined] = BaseSymbol;
-        ends[num_symbols_defined] = BaseSymbol;
+        symbol_data[num_symbols_defined].starts = symbol_data[num_symbols_defined].ends = (unsigned char)BaseSymbol;
         *end_define_string_ptr++ = (unsigned char)BaseSymbol;
       }
     }
-    prior_end = BaseSymbol;
-    if (UTF8_compliant && (prior_end > 0x80))
+    if (UTF8_compliant && (BaseSymbol > 0x80))
       prior_end = 0x80;
-      if (found_first_symbol == 0) {
-        found_first_symbol = 1;
+    else
+      prior_end = (unsigned char)BaseSymbol;
+    if (find_first_symbol) {
+      find_first_symbol = 0;
       end_symbol = prior_end;
-      if (sym_list_ptrs[end_symbol][max_code_length] == 0)
-        sym_list_ptrs[end_symbol][max_code_length] = (unsigned int *)malloc(sizeof(unsigned int) * INITIAL_LIST_SIZE);
-      sym_list_ptrs[end_symbol][max_code_length][0] = MAX_SYMBOLS_DEFINED - 1;
-      nsob[end_symbol][max_code_length] = 1;
-      nbob[end_symbol][max_code_length] = 1;
+      sym_list_ptrs[prior_end][max_code_length][0] = MAX_SYMBOLS_DEFINED - 1;
+      nsob[prior_end][max_code_length] = 1;
       if (max_code_length >= 12) {
-        nbob_shift[end_symbol] = max_code_length - 12;
-        nbob[end_symbol][max_code_length] = 1;
-        sum_nbob[end_symbol] = 1;
+        bin_bits_under_max[prior_end] = max_code_length;
+        sum_nbob[prior_end] = nbob[prior_end][max_code_length] = 1;
       }
-      else {
-        nbob[end_symbol][max_code_length] = 1 << (12 - max_code_length);
-        sum_nbob[end_symbol] = 1 << (12 - max_code_length);
-      }
+      else
+        sum_nbob[prior_end] = nbob[prior_end][max_code_length] = 1 << (12 - max_code_length);
     }
     if (define_symbol_instances == 1) {
-      symbol_string_ptr = symbol_strings + symbol_string_indexes[num_symbols_defined];
+      symbol_string_ptr = symbol_strings + symbol_data[num_symbols_defined].string_index;
       define_string_ptr = define_string;
       while (define_string_ptr != end_define_string_ptr)
         *symbol_string_ptr++ = *define_string_ptr++;
-      symbol_string_indexes[++num_symbols_defined] = symbol_string_ptr - symbol_strings;
-      if (char_before_define_is_cap)
-        *define_string -= 0x20;
+      if ((BaseSymbol == (unsigned int)' ') || (BaseSymbol == CAP_CHAR))
+        symbol_data[num_symbols_defined].type |= 0x10;
+      symbol_number = num_symbols_defined;
+      symbol_data[++num_symbols_defined].string_index = symbol_string_ptr - symbol_strings;
       return(end_define_string_ptr);
+    }
+    if (BaseSymbol != CAP_CHAR) {
+      symbol_string_ptr = symbol_strings + symbol_data[num_symbols_defined].string_index;
+      define_string_ptr = define_string;
+      copy_string(define_string_ptr, end_define_string_ptr, symbol_string_ptr);
+      symbol_data[num_symbols_defined+1].string_index = symbol_string_ptr - symbol_strings;
+      if (char_before_define_is_cap && first_char_needs_cap)
+        *define_string -= 0x20;
+      if (BaseSymbol == (unsigned int)' ')
+        symbol_data[num_symbols_defined].type |= 0x10;
+    }
+    else {
+      symbol_data[num_symbols_defined+1].string_index = symbol_data[num_symbols_defined].string_index;
+      symbol_data[num_symbols_defined].type |= 0x10;
     }
   }
   else {
-    if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
-      define_symbol_instances = 0;
-      define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
-      if ((define_symbol_code_length > 10) && (use_mtf || (max_code_length >= 12))) {
-        DecodeERG();
-      }
+    DecodeSIDFinish(prior_is_cap);
+    if ((symbols_in_definition = SIDSymbol + 1) == 16) {
+      get_extra_length();
+    }
+    DecodeINSTStart(prior_is_cap);
+    if (DecodeINSTCheck0(prior_is_cap)) {
+      DecodeINSTFinish0(prior_is_cap);
+      define_symbol_instances = 2;
+      define_symbol_code_length = max_code_length;
     }
     else {
-      define_symbol_instances = Instances + 2;
-      define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
+      DecodeINSTFinish(prior_is_cap);
+      if (Instances >= MAX_INSTANCES_FOR_MTF_QUEUE) {
+        define_symbol_instances = 0;
+        define_symbol_code_length = max_regular_code_length + MAX_INSTANCES_FOR_MTF_QUEUE - Instances;
+      }
+      else {
+        define_symbol_instances = Instances + 2;
+        define_symbol_code_length = mtf_queue_miss_code_length[define_symbol_instances];
+      }
     }
 
-    first_symbol = 1;
     do { // Build the symbol string from the next symbols_in_definition symbols
       if (prior_is_cap == 0) {
-        DecodeSymType(LEVEL1);
-        if (Symbol != 1) {
-          if (Symbol != 0) {
-            if (Symbol == 2) {
-              get_mtfg_symbol();
+        DecodeSymTypeStart(LEVEL1);
+        if (DecodeSymTypeCheckType0(LEVEL1)) {
+          DecodeSymTypeFinishType0(LEVEL1);
+          if (symbol_data[symbol_number].type & 0x20) {
+            if (symbol_data[symbol_number].type & 0x80) {
+              DecodeFirstChar(2, prior_end);
+            }
+            else if (symbol_data[symbol_number].type & 0x40) {
+              DecodeFirstChar(3, prior_end);
             }
             else {
-              get_mtf_symbol();
+              DecodeFirstChar(1, prior_end);
             }
           }
           else {
-            DecodeFirstChar(prior_end);
-            DictionaryBins = sum_nbob[FirstChar];
-            DecodeDictionaryBin(lookup_bits[FirstChar]);
-            if (CodeLength > 12 + nbob_shift[FirstChar]) {
-              get_long_symbol();
+            DecodeFirstChar(0, prior_end);
+          }
+          DictionaryBins = sum_nbob[FirstChar];
+          DecodeDictionaryBin(lookup_bits[FirstChar]);
+          if (CodeLength > bin_bits_under_max[FirstChar]) {
+            get_long_symbol();
+          }
+          else {
+            get_short_symbol();
+          }
+          if (symbol_data[symbol_number].instances <= MAX_INSTANCES_FOR_MTF_QUEUE) {
+            if (use_mtf) {
+              insert_mtf_queue(NOT_CAP);
             }
-            else {
-              get_short_symbol();
-            }
-            if (symbol_instances[symbol_number] <= 20) {
-              if (use_mtf) {
-                insert_mtf_queue(NOT_CAP);
-              }
-              else if (--symbols_remaining[symbol_number] == 0) {
-                remove_dictionary_symbol(symbol_number,CodeLength);
-              }
-            }
-            else if (symbol_type[symbol_number] & 4) {
-              add_new_symbol_to_mtfg_queue(symbol_number);
+            else if (--symbol_data[symbol_number].remaining == 0) {
+              remove_dictionary_symbol(symbol_number,CodeLength);
             }
           }
-          prior_end = ends[symbol_number];
-          symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol_number];
-          next_string_ptr = symbol_strings + symbol_string_indexes[symbol_number + 1];
+          else if (symbol_data[symbol_number].type & 4) {
+            add_new_symbol_to_mtfg_queue(symbol_number);
+          }
+          prior_end = symbol_data[symbol_number].ends;
+          symbol_string_ptr = symbol_strings + symbol_data[symbol_number].string_index;
+          next_string_ptr = symbol_strings + symbol_data[symbol_number + 1].string_index;
           while (symbol_string_ptr != next_string_ptr)
             *end_define_string_ptr++ = *symbol_string_ptr++;
-          caps_on = symbol_type[symbol_number] & 1;
+          caps_on = symbol_data[symbol_number].type & 1;
           prior_is_cap = caps_on;
         }
+        else if (DecodeSymTypeCheckType1(LEVEL1)) {
+          DecodeSymTypeFinishType1(LEVEL1);
+          end_define_string_ptr = decode_define_cap_encoded(end_define_string_ptr,caps_on);
+        }
         else {
-          end_define_string_ptr = decode_define_cap_encoded(end_define_string_ptr,first_symbol);
+          if (DecodeSymTypeCheckType2(LEVEL1)) {
+            DecodeSymTypeFinishType2(LEVEL1);
+            get_mtfg_symbol();
+          }
+          else {
+            DecodeSymTypeFinishType3(LEVEL1);
+            get_mtf_symbol();
+          }
+          prior_end = symbol_data[symbol_number].ends;
+          symbol_string_ptr = symbol_strings + symbol_data[symbol_number].string_index;
+          next_string_ptr = symbol_strings + symbol_data[symbol_number + 1].string_index;
+          while (symbol_string_ptr != next_string_ptr)
+            *end_define_string_ptr++ = *symbol_string_ptr++;
+          caps_on = symbol_data[symbol_number].type & 1;
+          prior_is_cap = caps_on;
         }
       }
       else { // prior_is_cap
-        DecodeSymType(LEVEL1_CAP);
-        if (Symbol != 1) {
-          if (Symbol != 0) {
-            if (Symbol == 2) {
-              get_mtfg_symbol_cap();
+        DecodeSymTypeStart(LEVEL1_CAP);
+        if (DecodeSymTypeCheckType0(LEVEL1_CAP)) {
+          DecodeSymTypeFinishType0(LEVEL1_CAP);
+          if (symbol_data[symbol_number].type & 0x20) {
+            if (symbol_data[symbol_number].type & 0x80) {
+              DecodeFirstChar(2, prior_end);
+            }
+            else if (symbol_data[symbol_number].type & 0x40) {
+              DecodeFirstChar(3, prior_end);
             }
             else {
-              get_mtf_symbol_cap();
+              DecodeFirstChar(1, prior_end);
             }
           }
           else {
-            DecodeFirstChar(prior_end);
-            DictionaryBins = sum_nbob[FirstChar];
-            DecodeDictionaryBin(lookup_bits[FirstChar]);
-            if (CodeLength > 12 + nbob_shift[FirstChar]) {
-              get_long_symbol();
+            DecodeFirstChar(0, prior_end);
+          }
+          DictionaryBins = sum_nbob[FirstChar];
+          DecodeDictionaryBin(lookup_bits[FirstChar]);
+          if (CodeLength > bin_bits_under_max[FirstChar]) {
+            get_long_symbol();
+          }
+          else {
+            get_short_symbol();
+          }
+          if (symbol_data[symbol_number].instances <= MAX_INSTANCES_FOR_MTF_QUEUE) {
+            if (use_mtf) {
+              insert_mtf_queue(CAP);
             }
-            else {
-              get_short_symbol();
-            }
-            if (symbol_instances[symbol_number] <= 20) {
-              if (use_mtf) {
-                insert_mtf_queue(CAP);
-              }
-              else if (--symbols_remaining[symbol_number] == 0) {
-                remove_dictionary_symbol(symbol_number,CodeLength);
-              }
-            }
-            else if (symbol_type[symbol_number] & 4) {
-              add_new_symbol_to_mtfg_queue(symbol_number);
+            else if (--symbol_data[symbol_number].remaining == 0) {
+              remove_dictionary_symbol(symbol_number,CodeLength);
             }
           }
-          prior_end = ends[symbol_number];
-          symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol_number];
-          next_string_ptr = symbol_strings + symbol_string_indexes[symbol_number + 1];
+          else if (symbol_data[symbol_number].type & 4) {
+            add_new_symbol_to_mtfg_queue(symbol_number);
+          }
+          prior_end = symbol_data[symbol_number].ends;
+          symbol_string_ptr = symbol_strings + symbol_data[symbol_number].string_index;
+          next_string_ptr = symbol_strings + symbol_data[symbol_number + 1].string_index;
           if (caps_on)
             *end_define_string_ptr++ = *symbol_string_ptr++ - 0x20;
           while (symbol_string_ptr != next_string_ptr)
             *end_define_string_ptr++ = *symbol_string_ptr++;
-          caps_on = symbol_type[symbol_number] & 1;
+          caps_on = symbol_data[symbol_number].type & 1;
           prior_is_cap = caps_on;
         }
+        else if (DecodeSymTypeCheckType1(LEVEL1_CAP)) {
+          DecodeSymTypeFinishType1(LEVEL1_CAP);
+          end_define_string_ptr = decode_define_cap_encoded(end_define_string_ptr,caps_on);
+        }
         else {
-          end_define_string_ptr = decode_define_cap_encoded(end_define_string_ptr,first_symbol);
+          if (DecodeSymTypeCheckType2(LEVEL1_CAP)) {
+            DecodeSymTypeFinishType2(LEVEL1_CAP);
+            get_mtfg_symbol_cap();
+          }
+          else {
+            DecodeSymTypeFinishType3(LEVEL1_CAP);
+            get_mtf_symbol_cap();
+          }
+          prior_end = symbol_data[symbol_number].ends;
+          symbol_string_ptr = symbol_strings + symbol_data[symbol_number].string_index;
+          next_string_ptr = symbol_strings + symbol_data[symbol_number + 1].string_index;
+          if (caps_on)
+            *end_define_string_ptr++ = *symbol_string_ptr++ - 0x20;
+          while (symbol_string_ptr != next_string_ptr)
+            *end_define_string_ptr++ = *symbol_string_ptr++;
+          caps_on = symbol_data[symbol_number].type & 1;
+          prior_is_cap = caps_on;
         }
       }
-      first_symbol = 0;
     } while (--symbols_in_definition);
-    symbol_type[num_symbols_defined] = (nonergodic << 2) + (((*define_string >= 'a') && (*define_string <= 'z')) << 1) + caps_on;
+    symbol_data[num_symbols_defined].type = (((*define_string >= 'a') && (*define_string <= 'z')) << 1) + caps_on;
     if (*define_string < 0x80) {
       if ((*define_string > 0x40) && (*define_string < 0x5b))
-        starts[num_symbols_defined] = 0x43;
+        symbol_data[num_symbols_defined].starts = CAP_CHAR;
       else
-        starts[num_symbols_defined] = *define_string;
+        symbol_data[num_symbols_defined].starts = *define_string;
     }
     else if (UTF8_compliant)
-      starts[num_symbols_defined] = 0x80;
+      symbol_data[num_symbols_defined].starts = 0x80;
     else
-      starts[num_symbols_defined] = *define_string;
-    ends[num_symbols_defined] = prior_end;
+      symbol_data[num_symbols_defined].starts = *define_string;
+    symbol_data[num_symbols_defined].ends = prior_end;
+
+    symbol_string_ptr = symbol_strings + symbol_data[num_symbols_defined].string_index;
+    define_string_ptr = define_string;
+    copy_string(define_string_ptr, end_define_string_ptr, symbol_string_ptr);
+    symbol_data[num_symbols_defined+1].string_index = symbol_string_ptr - symbol_strings;
+    if (char_before_define_is_cap && first_char_needs_cap)
+      *define_string -= 0x20;
+
+    if (symbol_data[symbol_number].type & 0x10) {
+      symbol_data[num_symbols_defined].type |= symbol_data[symbol_number].type & 0x30;
+      if (symbol_data[num_symbols_defined].type & 0x20) {
+        if (symbol_data[symbol_number].type & 0x80)
+          symbol_data[num_symbols_defined].type |= 0xC0;
+        else if (define_symbol_instances == 0) {
+          DecodeWordTag();
+          tag_type = 1 + Symbol;
+          symbol_data[num_symbols_defined].type |= 0x40 + (Symbol << 7);
+        }
+        else
+          symbol_data[num_symbols_defined].type |= symbol_data[symbol_number].type & 0xC0;
+      }
+    }
+    else {
+      unsigned char * start_string_ptr = symbol_strings + symbol_data[num_symbols_defined].string_index;
+      symbol_string_ptr--;
+      if (((symbol_data[num_symbols_defined].type & 1) == 0) && (*symbol_string_ptr != (unsigned int)' ')) {
+        while (symbol_string_ptr-- != start_string_ptr) {
+          if (*symbol_string_ptr == (unsigned int)' ') {
+            symbol_data[num_symbols_defined].type |= 0x30;
+            if (define_symbol_instances == 0) {
+              DecodeWordTag();
+              tag_type = 1 + Symbol;
+              symbol_data[num_symbols_defined].type |= 0x40 + (Symbol << 7);
+            }
+            break;
+          }
+        }
+      }
+      else
+        symbol_data[num_symbols_defined].type |= 0x10;
+    }
   }
 
   if (define_symbol_instances) { // mtf queue symbol
     if (define_symbol_instances == 2) {
-      symbol_instances[num_symbols_defined] = 2;
-      symbols_remaining[num_symbols_defined] = 1;
+      symbol_data[num_symbols_defined].instances = 2;
+      symbol_data[num_symbols_defined].remaining = 1;
       if (use_mtf) {
         mtf_queue_number = 0;
         if (char_before_define_is_cap == 0) {
@@ -1583,12 +2018,10 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
         if (mtf_queue_size[2] != MTF_QUEUE_SIZE) // put the symbol in the mtf queue
           mtf_queue[2][(mtf_queue_size[2]++ + mtf_queue_offset[2]) & 0x3F] = num_symbols_defined;
         else { // put last mtf queue symbol in symbol list
-          mtf_queue_ptr = &mtf_queue[2][mtf_queue_offset[2]];
-          symbol_number = *mtf_queue_ptr;
+          symbol_number = *(mtf_queue_ptr = &mtf_queue[2][mtf_queue_offset[2]++ & 0x3F]);
           add_dictionary_symbol(symbol_number,define_symbol_code_length);
           // put symbol in queue and rotate cyclical buffer
           *mtf_queue_ptr = num_symbols_defined;
-          mtf_queue_offset[2] = (mtf_queue_offset[2] + 1) & 0x3F;
         }
       }
       else {
@@ -1596,8 +2029,8 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
       }
     }
     else {
-      symbol_instances[num_symbols_defined] = define_symbol_instances;
-      symbols_remaining[num_symbols_defined] = define_symbol_instances - 1;
+      symbol_data[num_symbols_defined].instances = define_symbol_instances;
+      symbol_data[num_symbols_defined].remaining = define_symbol_instances - 1;
       if (use_mtf) {
         mtf_queue_number = define_symbol_instances - 2;
         if (char_before_define_is_cap == 0) {
@@ -1611,12 +2044,11 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
                 [(mtf_queue_size[define_symbol_instances]++ + mtf_queue_offset[define_symbol_instances]) & 0x3F]
               = num_symbols_defined;
         else { // put last mtf queue symbol in symbol list
-          mtf_queue_ptr = &mtf_queue[define_symbol_instances][mtf_queue_offset[define_symbol_instances]];
-          symbol_number = *mtf_queue_ptr;
+          symbol_number
+              = *(mtf_queue_ptr = &mtf_queue[define_symbol_instances][mtf_queue_offset[define_symbol_instances]++ & 0x3F]);
           add_dictionary_symbol(symbol_number,define_symbol_code_length);
           // put symbol in queue and rotate cyclical buffer
           *mtf_queue_ptr = num_symbols_defined;
-          mtf_queue_offset[define_symbol_instances] = (mtf_queue_offset[define_symbol_instances] + 1) & 0x3F;
         }
       }
       else {
@@ -1625,18 +2057,18 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
     }
   }
   else { // put symbol in table
-    if (nonergodic) {
-      add_new_symbol_to_mtfg_queue(num_symbols_defined);
+    if ((define_symbol_code_length > 10) && use_mtf) {
+      unsigned char nonergodic;
+      DecodeERG(tag_type);
+      if (nonergodic) {
+        symbol_data[num_symbols_defined].type |= 4;
+        add_new_symbol_to_mtfg_queue(num_symbols_defined);
+      }
     }
-    symbol_instances[num_symbols_defined] = 20 + define_symbol_code_length;
+    symbol_data[num_symbols_defined].instances = MAX_INSTANCES_FOR_MTF_QUEUE + define_symbol_code_length;
     add_dictionary_symbol(num_symbols_defined,define_symbol_code_length);
   }
-  symbol_string_ptr = symbol_strings + symbol_string_indexes[num_symbols_defined];
-  define_string_ptr = define_string;
-  copy_string(define_string_ptr, end_define_string_ptr, symbol_string_ptr);
-  symbol_string_indexes[++num_symbols_defined] = symbol_string_ptr - symbol_strings;
-  if (char_before_define_is_cap && (first_symbol_in_string == 0))
-    *define_string -= 0x20;
+  symbol_number = num_symbols_defined++;
   return(end_define_string_ptr);
 }
 
@@ -1693,11 +2125,11 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
   if (cap_encoded) { \
     symbol = *symbol_array_ptr; \
     while (symbol != -1) { \
-      symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol]; \
-      next_symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol + 1]; \
+      symbol_string_ptr = symbol_strings + symbol_data[symbol].string_index; \
+      next_symbol_string_ptr = symbol_strings + symbol_data[symbol + 1].string_index; \
       if (write_caps_on == 1) \
         *out_char_ptr++ = *symbol_string_ptr++ - 0x20; \
-      write_caps_on = symbol_type[symbol] & 1; \
+      write_caps_on = symbol_data[symbol].type & 1; \
       *symbol_array_ptr++ = -1; \
       if (symbol_array_ptr == symbol_array_end_ptr) \
         symbol_array_ptr = symbol_array_start_ptr; \
@@ -1708,8 +2140,8 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
   else if (delta_gap == 0) { \
     symbol = *symbol_array_ptr; \
     while (symbol != -1) { \
-      symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol]; \
-      next_symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol + 1]; \
+      symbol_string_ptr = symbol_strings + symbol_data[symbol].string_index; \
+      next_symbol_string_ptr = symbol_strings + symbol_data[symbol + 1].string_index; \
       *symbol_array_ptr++ = -1; \
       if (symbol_array_ptr == symbol_array_end_ptr) \
         symbol_array_ptr = symbol_array_start_ptr; \
@@ -1720,8 +2152,8 @@ unsigned char* decode_define_cap_encoded(unsigned char* define_string, unsigned 
   else { \
     symbol = *symbol_array_ptr; \
     while (symbol != -1) { \
-      symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol]; \
-      next_symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol + 1]; \
+      symbol_string_ptr = symbol_strings + symbol_data[symbol].string_index; \
+      next_symbol_string_ptr = symbol_strings + symbol_data[symbol + 1].string_index; \
       *symbol_array_ptr++ = -1; \
       if (symbol_array_ptr == symbol_array_end_ptr) \
         symbol_array_ptr = symbol_array_start_ptr; \
@@ -1782,7 +2214,7 @@ void *write_output_thread(void *arg) {
   unsigned char write_caps_on;
   unsigned int symbol, *symbol_array_start_ptr, *symbol_array_end_ptr, *symbol_array_ptr;
   volatile unsigned int *vol_symbol_array_ptr;
-  volatile unsigned char *symbol_type_array = symbol_type;
+  volatile struct sym_data *symbol_data_array = symbol_data;
   volatile unsigned char *cap_encoded_ptr = &cap_encoded;
 
   filename = (unsigned char *)arg;
@@ -1811,11 +2243,11 @@ void *write_output_thread(void *arg) {
     while ((done_parsing == 0) || (*vol_symbol_array_ptr != -1)) {
       symbol = *vol_symbol_array_ptr;
       while (symbol != -1) {
-        symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol];
-        next_symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol + 1];
+        symbol_string_ptr = symbol_strings + symbol_data[symbol].string_index;
+        next_symbol_string_ptr = symbol_strings + symbol_data[symbol + 1].string_index;
         if (write_caps_on == 1)
           *out_char_ptr++ = *symbol_string_ptr++ - 0x20;
-        write_caps_on = symbol_type_array[symbol] & 1;
+        write_caps_on = symbol_data_array[symbol].type & 1;
         *vol_symbol_array_ptr++ = -1;
         if (vol_symbol_array_ptr == symbol_array_end_ptr)
           vol_symbol_array_ptr = symbol_array_start_ptr;
@@ -1828,8 +2260,8 @@ void *write_output_thread(void *arg) {
     while ((done_parsing == 0) || (*vol_symbol_array_ptr != -1)) {
       symbol = *vol_symbol_array_ptr;
       while (symbol != -1) {
-        symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol];
-        next_symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol + 1];
+        symbol_string_ptr = symbol_strings + symbol_data[symbol].string_index;
+        next_symbol_string_ptr = symbol_strings + symbol_data[symbol + 1].string_index;
         *vol_symbol_array_ptr++ = -1;
         if (vol_symbol_array_ptr == symbol_array_end_ptr)
           vol_symbol_array_ptr = symbol_array_start_ptr;
@@ -1842,8 +2274,8 @@ void *write_output_thread(void *arg) {
     while ((done_parsing == 0) || (*vol_symbol_array_ptr != -1)) {
       symbol = *vol_symbol_array_ptr;
       while (symbol != -1) {
-        symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol];
-        next_symbol_string_ptr = symbol_strings + symbol_string_indexes[symbol + 1];
+        symbol_string_ptr = symbol_strings + symbol_data[symbol].string_index;
+        next_symbol_string_ptr = symbol_strings + symbol_data[symbol + 1].string_index;
         *vol_symbol_array_ptr++ = -1;
         if (vol_symbol_array_ptr == symbol_array_end_ptr)
           vol_symbol_array_ptr = symbol_array_start_ptr;
@@ -1862,19 +2294,19 @@ void *write_output_thread(void *arg) {
 #define send_symbol() { \
   out_symbol_array[out_symbol_count++] = symbol_number; \
   manage_io(); \
-  prior_end = ends[symbol_number]; \
+  prior_end = symbol_data[symbol_number].ends; \
 }
 
 
 #define send_symbol_cap() { \
-  prior_is_cap = symbol_type[symbol_number] & 1; \
+  prior_is_cap = symbol_data[symbol_number].type & 1; \
   send_symbol(); \
 }
 
 
 int main(int argc, char* argv[]) {
   unsigned int *define_symbol_end_ptr;
-  unsigned char arg_num, this_char, *string_ptr, *string_end_ptr;
+  unsigned char arg_num, num_inst_codes;
   unsigned long long int start_time;
   pthread_t output_thread;
 
@@ -1926,7 +2358,7 @@ int main(int argc, char* argv[]) {
   mtfg_queue_64_offset = 0;
   mtfg_queue_128_offset = 0;
   mtfg_queue_192_offset = 0;
-  symbol_string_indexes[0] = 0;
+  symbol_data[0].string_index = 0;
   num_symbols_defined = 0;
   out_symbol_count = 0;
 
@@ -1944,7 +2376,6 @@ int main(int argc, char* argv[]) {
   use_mtf = (out_char0[0] >> 5) & 1;
   base_bits = out_char0[0] & 0x1F;
   max_code_length = (out_char0[1] & 0x1F) + 1;
-  max_code_length_symbols_per_bin = 0x2000 >> (25 - max_code_length);
   max_regular_code_length = (out_char0[2] & 0x1F) + 1;
   delta_gap = out_char0[1] >> 5;
   if (delta_gap == 3)
@@ -1956,11 +2387,12 @@ int main(int argc, char* argv[]) {
   do {
     mtf_queue_miss_code_length[12 - i1] = mtf_queue_miss_code_length[11 - i1] - ((out_char0[3] >> i1) & 1);
   } while (i1--);
-  i1 = 7;
+  i1 = 2;
   do {
-    mtf_queue_miss_code_length[20 - i1] = mtf_queue_miss_code_length[19 - i1] - ((out_char0[4] >> i1) & 1);
+    mtf_queue_miss_code_length[15 - i1] = mtf_queue_miss_code_length[14 - i1] - ((out_char0[4] >> i1) & 1);
   } while (i1--);
-  symbol_type[MAX_SYMBOLS_DEFINED - 1] = 0;
+  num_inst_codes = MAX_INSTANCES_FOR_MTF_QUEUE + max_regular_code_length - (out_char0[4] >> 3);
+  symbol_data[MAX_SYMBOLS_DEFINED - 1].type = 0;
   i1 = 0x1000;
   while (i1--) {
     i2 = 0x100;
@@ -1984,49 +2416,51 @@ int main(int argc, char* argv[]) {
     mtfg_queue_192[i1] = MAX_SYMBOLS_DEFINED - 1;
   }
 
-  InitDecoder(fd_in);
+  InitDecoder(fd_in, num_inst_codes);
+
+  i1 = 0xFF;
+  if (UTF8_compliant)
+    i1 = 0x80;
+  do {
+    for (i2 = 1 ; i2 <= max_code_length ; i2++) {
+      sym_list_ptrs[i1][i2] = (unsigned int *)malloc(sizeof(unsigned int) * INITIAL_LIST_SIZE);
+      nsob[i1][i2] = 0;
+      nbob[i1][i2] = 0;
+      fbob[i1][i2] = 0;
+    }
+    big_sym_list[i1] = 0;
+    bin_bits_under_max[i1] = max_code_length;
+    sum_nbob[i1] = 0;
+  } while (i1--);
+  find_first_symbol = 1;
 
   if (num_threads == 2)
     while (output_ready == 0);
-
-  if (UTF8_compliant) {
-    for (i1 = 0 ; i1 < 0x81 ; i1++) {
-      for (i2 = 1 ; i2 <= 25 ; i2++) {
-        sym_list_ptrs[i1][i2] = 0;
-        nsob[i1][i2] = 0;
-        nbob[i1][i2] = 0;
-        fbob[i1][i2] = 0;
-        big_sym_list[i1][i2] = 0;
-      }
-      nbob_shift[i1] = max_code_length - 12;
-      sum_nbob[i1] = 0;
-    }
-  }
-  else {
-    for (i1 = 0 ; i1 < 0x100 ; i1++) {
-      for (i2 = 1 ; i2 <= max_code_length ; i2++) {
-        sym_list_ptrs[i1][i2] = 0;
-        nsob[i1][i2] = 0;
-        nbob[i1][i2] = 0;
-        fbob[i1][i2] = 0;
-        big_sym_list[i1][i2] = 0;
-      }
-      nbob_shift[i1] = max_code_length - 12;
-      sum_nbob[i1] = 0;
-    }
-  }
-  found_first_symbol = 0;
 
   // symbol processing loop
   if (cap_encoded) {
     while (1) {
       if (prior_is_cap == 0) {
-        DecodeSymType(LEVEL0);
-        if (Symbol == 0) { // dictionary symbol
-          DecodeFirstChar(prior_end);
+        DecodeSymTypeStart(LEVEL0);
+        if (DecodeSymTypeCheckType0(LEVEL0)) { // dictionary symbol
+          DecodeSymTypeFinishType0(LEVEL0);
+          if (symbol_data[symbol_number].type & 0x20) {
+            if (symbol_data[symbol_number].type & 0x80) {
+              DecodeFirstChar(2, prior_end);
+            }
+            else if (symbol_data[symbol_number].type & 0x40) {
+              DecodeFirstChar(3, prior_end);
+            }
+            else {
+              DecodeFirstChar(1, prior_end);
+            }
+          }
+          else {
+            DecodeFirstChar(0, prior_end);
+          }
           DictionaryBins = sum_nbob[FirstChar];
           DecodeDictionaryBin(lookup_bits[FirstChar]);
-          if (CodeLength > 12 + nbob_shift[FirstChar]) {
+          if (CodeLength > bin_bits_under_max[FirstChar]) {
             get_long_symbol();
           }
           else {
@@ -2035,39 +2469,56 @@ int main(int argc, char* argv[]) {
               break; // EOF
           }
           send_symbol_cap();
-          if (symbol_instances[symbol_number] <= 20) {
+          if (symbol_data[symbol_number].instances <= MAX_INSTANCES_FOR_MTF_QUEUE) {
             if (use_mtf) {
               insert_mtf_queue(NOT_CAP);
             }
-            else if (--symbols_remaining[symbol_number] == 0) {
+            else if (--symbol_data[symbol_number].remaining == 0) {
               remove_dictionary_symbol(symbol_number,CodeLength);
             }
           }
-          else if (symbol_type[symbol_number] & 4) {
+          else if (symbol_data[symbol_number].type & 4) {
             add_new_symbol_to_mtfg_queue(symbol_number);
           }
         }
-        else if (Symbol == 1) {
+        else if (DecodeSymTypeCheckType1(LEVEL0)) {
+          DecodeSymTypeFinishType1(LEVEL0);
           decode_define_cap_encoded(new_symbol_string,0);
           out_symbol_array[out_symbol_count++] = num_symbols_defined - 1;
           manage_symbol_stream(out_char_ptr);
         }
-        else if (Symbol == 2) {
+        else if (DecodeSymTypeCheckType2(LEVEL0)) {
+          DecodeSymTypeFinishType2(LEVEL0);
           get_mtfg_symbol();
           send_symbol_cap();
         }
         else {
+          DecodeSymTypeFinishType3(LEVEL0);
           get_mtf_symbol();
           send_symbol_cap();
         }
       }
       else { // prior_is_cap
-        DecodeSymType(LEVEL0_CAP);
-        if (Symbol == 0) {
-          DecodeFirstChar(prior_end);
+        DecodeSymTypeStart(LEVEL0_CAP);
+        if (DecodeSymTypeCheckType0(LEVEL0_CAP)) { // dictionary symbol
+          DecodeSymTypeFinishType0(LEVEL0_CAP);
+          if (symbol_data[symbol_number].type & 0x20) {
+            if (symbol_data[symbol_number].type & 0x80) {
+              DecodeFirstChar(2, prior_end);
+            }
+            else if (symbol_data[symbol_number].type & 0x40) {
+              DecodeFirstChar(3, prior_end);
+            }
+            else {
+              DecodeFirstChar(1, prior_end);
+            }
+          }
+          else {
+            DecodeFirstChar(0, prior_end);
+          }
           DictionaryBins = sum_nbob[FirstChar];
           DecodeDictionaryBin(lookup_bits[FirstChar]);
-          if (CodeLength > 12 + nbob_shift[FirstChar]) {
+          if (CodeLength > bin_bits_under_max[FirstChar]) {
             get_long_symbol();
           }
           else {
@@ -2076,28 +2527,31 @@ int main(int argc, char* argv[]) {
               break; // EOF
           }
           send_symbol_cap();
-          if (symbol_instances[symbol_number] <= 20) {
+          if (symbol_data[symbol_number].instances <= MAX_INSTANCES_FOR_MTF_QUEUE) {
             if (use_mtf) {
               insert_mtf_queue(CAP);
             }
-            else if (--symbols_remaining[symbol_number] == 0) {
+            else if (--symbol_data[symbol_number].remaining == 0) {
               remove_dictionary_symbol(symbol_number,CodeLength);
             }
           }
-          else if ((CodeLength > 10) && (symbol_type[symbol_number] & 4)) {
+          else if ((CodeLength > 10) && (symbol_data[symbol_number].type & 4)) {
             add_new_symbol_to_mtfg_queue(symbol_number);
           }
         }
-        else if (Symbol == 1) {
+        else if (DecodeSymTypeCheckType1(LEVEL0_CAP)) {
+          DecodeSymTypeFinishType1(LEVEL0_CAP);
           decode_define_cap_encoded(new_symbol_string,0);
           out_symbol_array[out_symbol_count++] = num_symbols_defined - 1;
           manage_symbol_stream(out_char_ptr);
         }
-        else if (Symbol == 2) {
+        else if (DecodeSymTypeCheckType2(LEVEL0_CAP)) {
+          DecodeSymTypeFinishType2(LEVEL0_CAP);
           get_mtfg_symbol_cap();
           send_symbol_cap();
         }
         else {
+          DecodeSymTypeFinishType3(LEVEL0_CAP);
           get_mtf_symbol_cap();
           send_symbol_cap();
         }
@@ -2106,17 +2560,18 @@ int main(int argc, char* argv[]) {
   }
   else { // not cap encoded
     while (1) {
-      DecodeSymType(LEVEL0);
-      if (Symbol == 0) {
+      DecodeSymTypeStart(LEVEL0);
+      if (DecodeSymTypeCheckType0(LEVEL0)) { // dictionary symbol
+        DecodeSymTypeFinishType0(LEVEL0);
         if (UTF8_compliant) {
-          DecodeFirstChar(prior_end);
+          DecodeFirstChar(0, prior_end);
         }
         else {
           DecodeFirstCharBinary(prior_end);
         }
         DictionaryBins = sum_nbob[FirstChar];
         DecodeDictionaryBin(lookup_bits[FirstChar]);
-        if (CodeLength > 12 + nbob_shift[FirstChar]) {
+        if (CodeLength > bin_bits_under_max[FirstChar]) {
           get_long_symbol();
         }
         else {
@@ -2125,41 +2580,44 @@ int main(int argc, char* argv[]) {
             break; // EOF
         }
         send_symbol();
-        if (symbol_instances[symbol_number] <= 20) {
+        if (symbol_data[symbol_number].instances <= MAX_INSTANCES_FOR_MTF_QUEUE) {
           if (use_mtf) {
             insert_mtf_queue(NOT_CAP);
           }
-          else if (--symbols_remaining[symbol_number] == 0) {
+          else if (--symbol_data[symbol_number].remaining == 0) {
             remove_dictionary_symbol(symbol_number,CodeLength);
           }
         }
-        else if (symbol_type[symbol_number]) {
+        else if (symbol_data[symbol_number].type) {
           add_new_symbol_to_mtfg_queue(symbol_number);
         }
       }
-      else if (Symbol == 1) {
+      else if (DecodeSymTypeCheckType1(LEVEL0)) {
+        DecodeSymTypeFinishType1(LEVEL0);
         decode_define(new_symbol_string);
         out_symbol_array[out_symbol_count++] = num_symbols_defined - 1;
         manage_symbol_stream(out_char_ptr);
       }
-      else if (Symbol == 2) {
+      else if (DecodeSymTypeCheckType2(LEVEL0)) {
+        DecodeSymTypeFinishType2(LEVEL0);
         get_mtfg_symbol();
         send_symbol();
       }
       else {
+        DecodeSymTypeFinishType3(LEVEL0);
         get_mtf_symbol();
         send_symbol();
       }
     }
   }
 
-  i1 = 0x100;
+  i1 = 0xFF;
   if (UTF8_compliant)
-    i1 = 0x81;
-  while (i1--)
+    i1 = 0x80;
+  do {
     for (i2 = 1 ; i2 <= max_code_length ; i2++)
-      if (sym_list_ptrs[i1][i1])
-        free(sym_list_ptrs[i1][i2]);
+      free(sym_list_ptrs[i1][i2]);
+  } while (i1--);
 
   if (num_threads == 2) {
     done_parsing = 1;
