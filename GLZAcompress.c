@@ -1,6 +1,6 @@
 /***********************************************************************
 
-Copyright 2014-2015 Kennon Conrad
+Copyright 2014-2016 Kennon Conrad
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,130 +17,132 @@ limitations under the License.
 ***********************************************************************/
 
 // GLZAcompress.c
-//   Iteratively does the following until there are not any tokens worth generating:
-//     1. Counts the token occurances in the input data and calculates the log base 2 of each token's probability of occuring
-//     2. Builds portions of the generalized suffix tree and searches them for the "most compressible" token strings
+//   Iteratively does the following until there are no symbols worth generating:
+//     1. Counts the symbol occurances in the input data and calculates the log base 2 of each symbol's probability of occuring
+//     2. Builds portions of the generalized suffix tree and searches them for the "most compressible" symbol strings
 //     3. Invalidates less desireable strings that overlap with better ones
-//     4. Replaces each occurance of the best strings with a new token and adds the best strings to the end of the file
-//        with a unique (define) token marker at the start of the string
+//     4. Replaces each occurence of the best strings with a new symbol and adds the best strings to the end of the file
+//        with a unique (define) symbol marker at the start of the string
 //
 // Usage:
-//   GLZAcompress [-m#] [-r#] <infilename> <outfilename>, where the first # is any non-negative number and sets the cutoff score
-//       (default 4.5) and the second # is approximately the RAM usage / input file size ratio (default 6.5 for UTF-8 compliant
-//       files, 10.5 for non UTF-8 compliant files, minimum is 5.0).
+//   GLZAcompress [-m#] [-p#] [-r#] <infilename> <outfilename>, where
+//       -m# sets the production cost, default 6.0
+//       -p# sets the profit ratio weighting power, default 2.0 (must be >= 0.0)
+//       -r# sets the approximate RAM usage / input file size ratio (default 6.5 for UTF-8 compliant
+//           files, 10.5 for non UTF-8 compliant files, minimum is 5.0)
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
 #include <pthread.h>
+#include "GLZA.h"
 
-const INSERT_TOKEN_CHAR = 0xFE;
-const DEFINE_TOKEN_CHAR = 0xFF;
-const START_MY_TOKENS = 0x00080000;
-const size_t MAX_MEMORY_USAGE = 0x800000000;
-const MAX_WRITE_SIZE = 0x200000;
-const MAX_PRIOR_MATCHES = 20;
-const MAX_STRING_LENGTH = 8000;
-const BASE_NODES_CHILD_ARRAY_SIZE = 16;
-const NUM_PRECALCULATED_INSTANCE_LOGS = 10000;
-const NUM_PRECALCULATED_MATCH_RATIO_LOGS = 2000;
-const MAX_SCORES = 30000;
+const U8 INSERT_SYMBOL_CHAR = 0xFE;
+const U8 DEFINE_SYMBOL_CHAR = 0xFF;
+const U32 START_MY_SYMBOLS = 0x00080000;
+const U32 MAX_WRITE_SIZE = 0x200000;
+const U32 MAX_PRIOR_MATCHES = 20;
+const U32 MAX_STRING_LENGTH = 8000;
+const U32 BASE_NODES_CHILD_ARRAY_SIZE = 16;
+const U32 NUM_PRECALCULATED_INSTANCE_LOGS = 10000;
+const U32 NUM_PRECALCULATED_MATCH_RATIO_LOGS = 2000;
+const U32 MAX_SCORES = 30000;
 
 static struct string_node {
-  unsigned int token;
-  unsigned int last_match_index;
-  unsigned int sibling_node_num[4];
-  unsigned int instances;
-  unsigned int child_node_num;
+  U32 symbol;
+  U32 last_match_index;
+  U32 sibling_node_num[4];
+  U32 instances;
+  U32 child_node_num;
 } *string_nodes;
 
 static struct match_node {
-  unsigned int token;
-  unsigned int num_tokens;
-  unsigned int score_number;
+  U32 symbol;
+  U32 num_symbols;
+  U32 score_number;
   struct match_node *child_ptr;
-  unsigned int sibling_node_num[16];
+  U32 sibling_node_num[16];
   struct match_node *miss_ptr;
   struct match_node *hit_ptr;
 } *match_nodes, *match_node_ptr, *child_match_node_ptr, *search_node_ptr;
 
 struct node_score_data {
-  unsigned int last_match_index1;
-  unsigned int last_match_index2;
+  U32 last_match_index1;
+  U32 last_match_index2;
   float score;
-  unsigned short int num_tokens;
+  U16 num_symbols;
 } node_scores[30000];
 
 struct lcp_thread_data {
-  unsigned int min_token;
-  unsigned int max_token;
-  unsigned int string_nodes_limit;
-  unsigned int first_string_node_num;
-  unsigned int *current_token_ptr;
+  U32 min_symbol;
+  U32 max_symbol;
+  U32 string_nodes_limit;
+  U32 first_string_node_num;
+  U32 *current_symbol_ptr;
 } lcp_thread_data[12];
 
 struct rank_scores_struct {
   double score;
   volatile size_t node_ptrs;
-  short int node_num_tokens;
+  U16 node_num_symbols;
 } rank_scores_buffer[0x10000];
 
 struct score_data {
   struct string_node *node_ptr;
-  double log_expected_match_ratio;
-  unsigned short int num_tokens_in_string;
-  unsigned char next_sibling;
+  double string_entropy;
+  U16 num_symbols_in_string;
+  U8 next_sibling;
 } node_data[20000];
 
 struct overlap_check_data {
-  unsigned int *start_token_ptr;
-  unsigned int *stop_token_ptr;
+  U32 *start_symbol_ptr;
+  U32 *stop_symbol_ptr;
 } overlap_check_data[7];
 
 struct find_substitutions_data {
-  volatile unsigned int *start_token_ptr;
-  unsigned int *stop_token_ptr;
-  volatile unsigned int data[0x400000];
-  unsigned int extra_match_symbols;
-  volatile unsigned int num_substitutions;
-  volatile unsigned char done;
+  U32 *stop_symbol_ptr;
+  U32 extra_match_symbols;
+  volatile U32 *start_symbol_ptr;
+  volatile U32 num_substitutions;
+  volatile U32 data[0x400000];
+  volatile U8 done;
 } find_substitutions_data[6];
 
-unsigned int this_token, max_string_length, max_scores, i1;
-unsigned int num_base_tokens, node_instances, num_match_nodes, best_score_num_tokens, sibling_node_number;
-unsigned int new_token_number[30000];
-unsigned int token_count[10000000];
-unsigned int *start_token_ptr, *end_token_ptr, *in_token_ptr, *out_token_ptr, *min_token_ptr;
-unsigned int *base_string_nodes_child_node_num, *best_score_last_match_ptr, *node_last_match_ptr;
-unsigned int * volatile max_token_ptr;
-unsigned int * volatile stop_token_ptr;
-volatile unsigned int substitute_data[0x10000];
-unsigned short int node_ptrs_num, num_node_scores, node_scores_index[30000];
-double d_num_token_inv, min_score, cutoff_score;
-double log_match_ratios[2000], log_instances[10000], d_num_tokens_in_string_inv_pow5[10000];
-double *log_token_count_minus_log_num_tokens;
-unsigned char node_scores_bad[30000];
-unsigned char *char_buffer, *in_char_ptr, *out_char_ptr, *end_char_ptr;
+U32 this_symbol, max_string_length, max_scores, i1;
+U32 num_simple_symbols, node_instances, num_match_nodes, best_score_num_symbols, sibling_node_number;
+U32 new_symbol_number[30000];
+U32 symbol_count[10000000];
+U32 *start_symbol_ptr, *end_symbol_ptr, *in_symbol_ptr, *out_symbol_ptr, *min_symbol_ptr;
+U32 *base_string_nodes_child_node_num, *best_score_last_match_ptr, *node_last_match_ptr;
+U32 * volatile max_symbol_ptr;
+U32 * volatile stop_symbol_ptr;
+volatile U32 substitute_data[0x10000];
+U16 node_ptrs_num, num_node_scores, node_scores_index[30000];
+U8 node_scores_bad[30000];
+U8 *char_buffer, *in_char_ptr, *end_char_ptr;
+double log2_num_symbols_plus_substitution_cost, min_score, production_cost, profit_ratio_power;
+double new_symbol_cost[2000], log2_instances[10000];
+double *symbol_entropy;
 
 
 
-static inline unsigned int* init_best_score_ptrs()
+static inline U32* init_best_score_ptrs()
 {
-  best_score_last_match_ptr = node_scores[node_scores_index[i1]].last_match_index1 + start_token_ptr;
-  return(best_score_last_match_ptr - node_scores[node_scores_index[i1]].num_tokens + 1);
+  best_score_last_match_ptr = node_scores[node_scores_index[i1]].last_match_index1 + start_symbol_ptr;
+  return(best_score_last_match_ptr - node_scores[node_scores_index[i1]].num_symbols + 1);
 }
 
 
 
-#define init_match_node(match_num_tokens, match_score_number) \
+#define init_match_node(match_num_symbols, match_score_number) \
 { \
-  match_node_ptr->token = this_token; \
-  match_node_ptr->num_tokens = match_num_tokens; \
+  match_node_ptr->symbol = this_symbol; \
+  match_node_ptr->num_symbols = match_num_symbols; \
   match_node_ptr->score_number = match_score_number; \
   match_node_ptr->child_ptr = 0; \
-  size_t *sibling_nodes_ptr; \
-  sibling_nodes_ptr = (size_t *)&match_node_ptr->sibling_node_num[0]; \
+  U64 * sibling_nodes_ptr; \
+  sibling_nodes_ptr = (U64 *)&match_node_ptr->sibling_node_num[0]; \
   *sibling_nodes_ptr = 0; \
   *(sibling_nodes_ptr+1) = 0; \
   *(sibling_nodes_ptr+2) = 0; \
@@ -155,14 +157,14 @@ static inline unsigned int* init_best_score_ptrs()
 
 
 
-#define init_level_1_match_node(match_token, match_score_number) \
+#define init_level_1_match_node(match_symbol, match_score_number) \
 { \
-  match_node_ptr->token = match_token; \
-  match_node_ptr->num_tokens = 1; \
+  match_node_ptr->symbol = match_symbol; \
+  match_node_ptr->num_symbols = 1; \
   match_node_ptr->score_number = match_score_number; \
   match_node_ptr->child_ptr = 0; \
-  size_t *sibling_nodes_ptr; \
-  sibling_nodes_ptr = (size_t *)&match_node_ptr->sibling_node_num[0]; \
+  U64 *sibling_nodes_ptr; \
+  sibling_nodes_ptr = (U64 *)&match_node_ptr->sibling_node_num[0]; \
   *sibling_nodes_ptr = 0; \
   *(sibling_nodes_ptr+1) = 0; \
   *(sibling_nodes_ptr+2) = 0; \
@@ -179,12 +181,12 @@ static inline unsigned int* init_best_score_ptrs()
 
 #define move_to_match_sibling(match_node_ptr, sibling_number) \
 { \
-  unsigned int shifted_token = this_token; \
-  sibling_number = (unsigned char)(shifted_token & 0xF); \
-  while ((this_token != match_node_ptr->token) && (match_node_ptr->sibling_node_num[sibling_number] != 0)) { \
+  U32 shifted_symbol = this_symbol; \
+  sibling_number = (U8)(shifted_symbol & 0xF); \
+  while ((this_symbol != match_node_ptr->symbol) && (match_node_ptr->sibling_node_num[sibling_number] != 0)) { \
     match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[sibling_number]]; \
-    shifted_token = shifted_token >> 4; \
-    sibling_number = (unsigned char)(shifted_token & 0xF); \
+    shifted_symbol = shifted_symbol >> 4; \
+    sibling_number = (U8)(shifted_symbol & 0xF); \
   } \
 }
 
@@ -200,12 +202,12 @@ static inline unsigned int* init_best_score_ptrs()
 
 #define move_to_existing_match_sibling() \
 { \
-  unsigned int shifted_token = this_token; \
-  unsigned char sibling_number = (unsigned char)(shifted_token & 0xF); \
-  while (this_token != match_node_ptr->token) { \
+  U32 shifted_symbol = this_symbol; \
+  U8 sibling_number = (U8)(shifted_symbol & 0xF); \
+  while (this_symbol != match_node_ptr->symbol) { \
     match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[sibling_number]]; \
-    shifted_token = shifted_token >> 4; \
-    sibling_number = (unsigned char)(shifted_token & 0xF); \
+    shifted_symbol = shifted_symbol >> 4; \
+    sibling_number = (U8)(shifted_symbol & 0xF); \
   } \
 }
 
@@ -221,17 +223,17 @@ static inline unsigned int* init_best_score_ptrs()
 
 static inline void move_to_search_sibling()
 {
-  unsigned char sibling_nibble, sibling_depth;
-  unsigned int shifted_token;
+  U8 sibling_nibble, sibling_depth;
+  U32 shifted_symbol;
 
   sibling_depth = 0;
-  shifted_token = this_token;
-  sibling_nibble = (unsigned char)(shifted_token & 0xF);
-  while ((this_token != search_node_ptr->token) && (search_node_ptr->sibling_node_num[sibling_nibble] != 0)) {
+  shifted_symbol = this_symbol;
+  sibling_nibble = (U8)(shifted_symbol & 0xF);
+  while ((this_symbol != search_node_ptr->symbol) && (search_node_ptr->sibling_node_num[sibling_nibble] != 0)) {
     search_node_ptr = &match_nodes[search_node_ptr->sibling_node_num[sibling_nibble]];
     sibling_depth++;
-    shifted_token = shifted_token >> 4;
-    sibling_nibble = (unsigned char)(shifted_token & 0xF);
+    shifted_symbol = shifted_symbol >> 4;
+    sibling_nibble = (U8)(shifted_symbol & 0xF);
   }
   return;
 }
@@ -251,17 +253,16 @@ static inline void move_to_search_child()
 { \
   match_node_ptr->child_ptr = &match_nodes[num_match_nodes++]; \
   match_node_ptr = match_node_ptr->child_ptr; \
-  init_match_node(best_score_num_tokens,i1); \
+  init_match_node(best_score_num_symbols,i1); \
 }
 
 
 
-static inline void make_and_move_to_match_sibling(unsigned int num_tokens, unsigned int score_number,
-    unsigned char sibling_number)
+static inline void make_and_move_to_match_sibling(U32 num_symbols, U32 score_number, U8 sibling_number)
 {
   match_node_ptr->sibling_node_num[sibling_number] = num_match_nodes;
   match_node_ptr = &match_nodes[num_match_nodes++];
-  init_match_node(num_tokens,score_number);
+  init_match_node(num_symbols,score_number);
   return;
 }
 
@@ -274,10 +275,10 @@ static inline void move_to_match_child_with_make()
   }
   else {
     match_node_ptr = match_node_ptr->child_ptr;
-    unsigned char sibling_number;
+    U8 sibling_number;
     move_to_match_sibling(match_node_ptr,sibling_number);
-    if (this_token != match_node_ptr->token)
-      make_and_move_to_match_sibling(best_score_num_tokens,i1,sibling_number);
+    if (this_symbol != match_node_ptr->symbol)
+      make_and_move_to_match_sibling(best_score_num_symbols,i1,sibling_number);
   }
   return;
 }
@@ -286,7 +287,7 @@ static inline void move_to_match_child_with_make()
 
 static inline void write_siblings_miss_ptr(struct match_node *child_ptr)
 {
-  unsigned char sibling_nibble;
+  U8 sibling_nibble;
   child_ptr->miss_ptr = search_node_ptr->child_ptr;
   for (sibling_nibble=0 ; sibling_nibble<16 ; sibling_nibble++) {
     sibling_node_number = child_ptr->sibling_node_num[sibling_nibble];
@@ -300,7 +301,7 @@ static inline void write_siblings_miss_ptr(struct match_node *child_ptr)
 
 static inline void write_all_children_miss_ptr()
 {
-  unsigned char sibling_nibble;
+  U8 sibling_nibble;
   child_match_node_ptr = match_node_ptr->child_ptr;
   if (child_match_node_ptr->miss_ptr == 0) {
     child_match_node_ptr->miss_ptr = search_node_ptr->child_ptr;
@@ -315,34 +316,34 @@ static inline void write_all_children_miss_ptr()
 
 
 
-static inline void add_suffix(unsigned int this_token, unsigned int *in_token_ptr, unsigned int *next_string_node_num_ptr)
+static inline void add_suffix(U32 this_symbol, U32 *in_symbol_ptr, U32 *next_string_node_num_ptr)
 {
-  unsigned int search_token, match_start_index;
-  unsigned int *base_node_child_num_ptr, *node_data_ptr;
+  U32 search_symbol, match_start_index;
+  U32 *base_node_child_num_ptr, *node_data_ptr;
   struct string_node *child_ptr, *next_child_ptr;
-  search_token = *in_token_ptr;
-  base_node_child_num_ptr = &base_string_nodes_child_node_num[this_token * BASE_NODES_CHILD_ARRAY_SIZE + (search_token & 0xF)];
+  search_symbol = *in_symbol_ptr;
+  base_node_child_num_ptr = &base_string_nodes_child_node_num[this_symbol * BASE_NODES_CHILD_ARRAY_SIZE + (search_symbol & 0xF)];
   if (*base_node_child_num_ptr) {
-    unsigned int shifted_search_token;
-    match_start_index = in_token_ptr - start_token_ptr - 1;
+    U32 shifted_search_symbol;
+    match_start_index = in_symbol_ptr - start_symbol_ptr - 1;
     child_ptr = &string_nodes[*base_node_child_num_ptr];
-    if ((int)search_token >= 0) {
-      shifted_search_token = search_token >> 4;
-      while (search_token != child_ptr->token) { // follow siblings until match found or end of siblings found
-        unsigned int *next_child_node_num_ptr;
-        next_child_node_num_ptr = (unsigned int *)&child_ptr->sibling_node_num[shifted_search_token & 3];
+    if ((int)search_symbol >= 0) {
+      shifted_search_symbol = search_symbol >> 4;
+      while (search_symbol != child_ptr->symbol) { // follow siblings until match found or end of siblings found
+        U32 *next_child_node_num_ptr;
+        next_child_node_num_ptr = (U32 *)&child_ptr->sibling_node_num[shifted_search_symbol & 3];
         next_child_ptr = &string_nodes[*next_child_node_num_ptr];
         if (next_child_ptr != string_nodes) {
           child_ptr = next_child_ptr;
-          shifted_search_token = shifted_search_token >> 2;
+          shifted_search_symbol = shifted_search_symbol >> 2;
         }
         else { // no matching child so add sibling
-          node_data_ptr = (unsigned int *)&string_nodes[*next_string_node_num_ptr];
-          *node_data_ptr = *in_token_ptr;
-          *(node_data_ptr+1) = (unsigned int)(in_token_ptr - start_token_ptr);
-          *((unsigned long long *)node_data_ptr+1) = 0;
-          *((unsigned long long *)node_data_ptr+2) = 0;
-          *((unsigned long long *)node_data_ptr+3) = 1;
+          node_data_ptr = (U32 *)&string_nodes[*next_string_node_num_ptr];
+          *node_data_ptr = *in_symbol_ptr;
+          *(node_data_ptr+1) = (U32)(in_symbol_ptr - start_symbol_ptr);
+          *((U64 *)node_data_ptr+1) = 0;
+          *((U64 *)node_data_ptr+2) = 0;
+          *((U64 *)node_data_ptr+3) = 1;
           *next_child_node_num_ptr = *next_string_node_num_ptr;
           *next_string_node_num_ptr += 1;
           return;
@@ -351,52 +352,52 @@ static inline void add_suffix(unsigned int this_token, unsigned int *in_token_pt
       // found a matching sibling
       if (child_ptr->child_node_num == 0) {
         // matching child without grandchild so create grandchild for previous instance then add string to grandchild
-        node_data_ptr = (unsigned int *)&string_nodes[*next_string_node_num_ptr];
-        *node_data_ptr = *(start_token_ptr + child_ptr->last_match_index + 1);
+        node_data_ptr = (U32 *)&string_nodes[*next_string_node_num_ptr];
+        *node_data_ptr = *(start_symbol_ptr + child_ptr->last_match_index + 1);
         *(node_data_ptr+1) = child_ptr->last_match_index + 1;
-        *((unsigned long long *)node_data_ptr+1) = 0;
-        *((unsigned long long *)node_data_ptr+2) = 0;
-        *((unsigned long long *)node_data_ptr+3) = 1;
+        *((U64 *)node_data_ptr+1) = 0;
+        *((U64 *)node_data_ptr+2) = 0;
+        *((U64 *)node_data_ptr+3) = 1;
         child_ptr->child_node_num = *next_string_node_num_ptr;
         *next_string_node_num_ptr += 1;
       }
       if (match_start_index > child_ptr->last_match_index) {
         // increment instances and update last_match_index for strings that do not overlap
         child_ptr->instances++;
-        child_ptr->last_match_index = (unsigned int)(in_token_ptr - start_token_ptr);
+        child_ptr->last_match_index = (U32)(in_symbol_ptr - start_symbol_ptr);
       }
       child_ptr = &string_nodes[child_ptr->child_node_num];
 
-      unsigned int *next_child_node_num_ptr, *match_max_ptr;
-      match_max_ptr = start_token_ptr + match_start_index + MAX_STRING_LENGTH;
-      search_token = *++in_token_ptr;
-      if (search_token != child_ptr->token) { // go to sibling and check for end of siblings
-        if ((int)search_token < 0)
+      U32 *next_child_node_num_ptr, *match_max_ptr;
+      match_max_ptr = start_symbol_ptr + match_start_index + MAX_STRING_LENGTH;
+      search_symbol = *++in_symbol_ptr;
+      if (search_symbol != child_ptr->symbol) { // go to sibling and check for end of siblings
+        if ((int)search_symbol < 0)
           return;
 add_string_to_child_not_match:
-        next_child_node_num_ptr = (unsigned int *)&child_ptr->sibling_node_num[search_token & 3];
+        next_child_node_num_ptr = (U32 *)&child_ptr->sibling_node_num[search_symbol & 3];
         if (*next_child_node_num_ptr == 0)
           goto add_string_to_child_add_sibling;
         child_ptr = &string_nodes[*next_child_node_num_ptr];
-        if (search_token != child_ptr->token) {
-          shifted_search_token = search_token >> 2;
+        if (search_symbol != child_ptr->symbol) {
+          shifted_search_symbol = search_symbol >> 2;
 add_string_to_child_check_sibling:
-          next_child_node_num_ptr = (unsigned int *)&child_ptr->sibling_node_num[shifted_search_token & 3];
+          next_child_node_num_ptr = (U32 *)&child_ptr->sibling_node_num[shifted_search_symbol & 3];
           if (*next_child_node_num_ptr) {
             child_ptr = &string_nodes[*next_child_node_num_ptr];
-            if (search_token == child_ptr->token)
+            if (search_symbol == child_ptr->symbol)
               goto add_string_to_child_match;
-            shifted_search_token = shifted_search_token >> 2;
+            shifted_search_symbol = shifted_search_symbol >> 2;
             goto add_string_to_child_check_sibling;
           }
           else { // no matching child so add sibling
 add_string_to_child_add_sibling:
-            node_data_ptr = (unsigned int *)&string_nodes[*next_string_node_num_ptr];
-            *node_data_ptr = *in_token_ptr;
-            *(node_data_ptr+1) = (unsigned int)(in_token_ptr - start_token_ptr);
-            *((unsigned long long *)node_data_ptr+1) = 0;
-            *((unsigned long long *)node_data_ptr+2) = 0;
-            *((unsigned long long *)node_data_ptr+3) = 1;
+            node_data_ptr = (U32 *)&string_nodes[*next_string_node_num_ptr];
+            *node_data_ptr = *in_symbol_ptr;
+            *(node_data_ptr+1) = (U32)(in_symbol_ptr - start_symbol_ptr);
+            *((U64 *)node_data_ptr+1) = 0;
+            *((U64 *)node_data_ptr+2) = 0;
+            *((U64 *)node_data_ptr+3) = 1;
             *next_child_node_num_ptr = *next_string_node_num_ptr;
             *next_string_node_num_ptr += 1;
             return;
@@ -407,38 +408,38 @@ add_string_to_child_match:
       // found a matching sibling
       if (child_ptr->child_node_num == 0) {
         // matching child without grandchild so create grandchild for previous instance then add string to grandchild
-        if (in_token_ptr >= match_max_ptr)
+        if (in_symbol_ptr >= match_max_ptr)
           return;
-        node_data_ptr = (unsigned int *)&string_nodes[*next_string_node_num_ptr];
-        *node_data_ptr = *(start_token_ptr + (size_t)child_ptr->last_match_index + 1);
+        node_data_ptr = (U32 *)&string_nodes[*next_string_node_num_ptr];
+        *node_data_ptr = *(start_symbol_ptr + (size_t)child_ptr->last_match_index + 1);
         *(node_data_ptr+1) = child_ptr->last_match_index + 1;
-        *((unsigned long long *)node_data_ptr+1) = 0;
-        *((unsigned long long *)node_data_ptr+2) = 0;
-        *((unsigned long long *)node_data_ptr+3) = 1;
+        *((U64 *)node_data_ptr+1) = 0;
+        *((U64 *)node_data_ptr+2) = 0;
+        *((U64 *)node_data_ptr+3) = 1;
         child_ptr->child_node_num = *next_string_node_num_ptr;
         *next_string_node_num_ptr += 1;
       }
       if (match_start_index > child_ptr->last_match_index) {
         // increment instances and update last_match_index for strings that do not overlap
         child_ptr->instances++;
-        child_ptr->last_match_index = (unsigned int)(in_token_ptr - start_token_ptr);
+        child_ptr->last_match_index = (U32)(in_symbol_ptr - start_symbol_ptr);
       }
       child_ptr = &string_nodes[child_ptr->child_node_num];
-      search_token = *++in_token_ptr;
-      if (search_token == child_ptr->token)
+      search_symbol = *++in_symbol_ptr;
+      if (search_symbol == child_ptr->symbol)
         goto add_string_to_child_match;
-      if ((int)search_token >= 0)
+      if ((int)search_symbol >= 0)
         goto add_string_to_child_not_match;
       return;
     }
   }
-  else { // first occurence of the token, so create a child
-    node_data_ptr = (unsigned int *)&string_nodes[*next_string_node_num_ptr];
-    *node_data_ptr = search_token;
-    *(node_data_ptr+1) = (unsigned int)(in_token_ptr - start_token_ptr);
-    *((unsigned long long *)node_data_ptr+1) = 0;
-    *((unsigned long long *)node_data_ptr+2) = 0;
-    *((unsigned long long *)node_data_ptr+3) = 1;
+  else { // first occurence of the symbol, so create a child
+    node_data_ptr = (U32 *)&string_nodes[*next_string_node_num_ptr];
+    *node_data_ptr = search_symbol;
+    *(node_data_ptr+1) = (U32)(in_symbol_ptr - start_symbol_ptr);
+    *((U64 *)node_data_ptr+1) = 0;
+    *((U64 *)node_data_ptr+2) = 0;
+    *((U64 *)node_data_ptr+3) = 1;
     *base_node_child_num_ptr = *next_string_node_num_ptr;
     *next_string_node_num_ptr += 1;
   }
@@ -452,19 +453,19 @@ void *rank_scores_thread(void *arg)
   struct string_node *node_ptr, *next_child_ptr;
   double d_score;
   float score;
-  unsigned int *node_last_match_ptr;
-  unsigned short int num_tokens_in_string, score_index, node_score_num_tokens;
-  unsigned short int node_ptrs_num = 0;
+  U32 *node_last_match_ptr;
+  U16 num_symbols_in_string, score_index, node_score_num_symbols;
+  U16 node_ptrs_num = 0;
 
   do {
     node_ptr = (struct string_node *)rank_scores_buffer[node_ptrs_num].node_ptrs;
     if ((size_t)node_ptr > 1) {
       d_score = rank_scores_buffer[node_ptrs_num].score;
       if (d_score >= min_score) {
-        node_last_match_ptr = start_token_ptr + node_ptr->last_match_index;
+        node_last_match_ptr = start_symbol_ptr + node_ptr->last_match_index;
         score = (float)d_score;
         // find the position in the score list this node would go in
-        unsigned short int score_position, new_score_position, node_scores_search_size;
+        U16 score_position, new_score_position, node_scores_search_size;
         new_score_position = num_node_scores;
         node_scores_search_size = num_node_scores + 1;
         do {
@@ -476,14 +477,14 @@ void *rank_scores_thread(void *arg)
         } while (node_scores_search_size > 1);
 
         next_child_ptr = string_nodes + node_ptr->child_node_num;
-        num_tokens_in_string = rank_scores_buffer[node_ptrs_num].node_num_tokens;
-        unsigned int new_score_lmi1, new_score_lmi2, new_score_smi1_m_1, new_score_smi2_m_1;
+        num_symbols_in_string = rank_scores_buffer[node_ptrs_num].node_num_symbols;
+        U32 new_score_lmi1, new_score_lmi2, new_score_smi1_m_1, new_score_smi2_m_1;
         // check for overlaps with better score list nodes
         new_score_lmi1 = next_child_ptr->last_match_index - 1;
-        new_score_lmi2 = (unsigned int)(node_last_match_ptr - start_token_ptr);
+        new_score_lmi2 = (U32)(node_last_match_ptr - start_symbol_ptr);
 
         if (new_score_lmi1 == new_score_lmi2) {
-          unsigned int * sibling_node_num_ptr = &next_child_ptr->sibling_node_num[0];
+          U32 * sibling_node_num_ptr = &next_child_ptr->sibling_node_num[0];
           if (*sibling_node_num_ptr)
             new_score_lmi2 = string_nodes[*sibling_node_num_ptr].last_match_index - 1;
           else if (*(sibling_node_num_ptr + 1))
@@ -493,22 +494,22 @@ void *rank_scores_thread(void *arg)
           else if (*(sibling_node_num_ptr + 3))
             new_score_lmi2 = string_nodes[*(sibling_node_num_ptr + 3)].last_match_index - 1;
           else {
-            new_score_smi1_m_1 = new_score_lmi1 - num_tokens_in_string;
+            new_score_smi1_m_1 = new_score_lmi1 - num_symbols_in_string;
             score_position = 0;
             while (score_position < new_score_position) {
-              unsigned int score_last_match_index1;
+              U32 score_last_match_index1;
               score_index = node_scores_index[score_position];
-              node_score_num_tokens = node_scores[score_index].num_tokens;
+              node_score_num_symbols = node_scores[score_index].num_symbols;
               score_last_match_index1 = node_scores[score_index].last_match_index1;
-              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_tokens)
+              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_symbols)
                 score_position++;
               else {
-                unsigned int score_last_match_index2;
+                U32 score_last_match_index2;
                 score_last_match_index2 = node_scores[score_index].last_match_index2;
                 if (score_last_match_index2 <= new_score_smi1_m_1)
                   score_position++;
                 else if ((score_last_match_index1 <= new_score_smi1_m_1)
-                    && (new_score_lmi1 <= score_last_match_index2 - node_score_num_tokens))
+                    && (new_score_lmi1 <= score_last_match_index2 - node_score_num_symbols))
                   score_position++;
                 else
                   goto rank_scores_thread_node_done;
@@ -517,59 +518,59 @@ void *rank_scores_thread(void *arg)
             // no better overlapping score list nodes, so node will be put on the list
             // look for subsequent overlaps that should be removed (only looks for one to avoid min score reduction)
             if (score_position < num_node_scores) {
-              unsigned int eslmi1, eslmi2;
+              U32 eslmi1, eslmi2;
               score_index = node_scores_index[score_position];
               eslmi1 = node_scores[score_index].last_match_index1;
               eslmi2 = node_scores[score_index].last_match_index2;
-              node_score_num_tokens = node_scores[score_index].num_tokens;
+              node_score_num_symbols = node_scores[score_index].num_symbols;
 
 rank_scores_thread_check_overlap_lmi_equal:
-              if ((new_score_lmi1 > eslmi1 - node_score_num_tokens) && (eslmi2 > new_score_smi1_m_1)
-                  && ((eslmi1 > new_score_smi1_m_1) || (new_score_lmi1 > eslmi2 - node_score_num_tokens)))
+              if ((new_score_lmi1 > eslmi1 - node_score_num_symbols) && (eslmi2 > new_score_smi1_m_1)
+                  && ((eslmi1 > new_score_smi1_m_1) || (new_score_lmi1 > eslmi2 - node_score_num_symbols)))
                 goto rank_scores_thread_move_down;
               if (++score_position == num_node_scores)
                 goto rank_scores_thread_check_max;
               score_index = node_scores_index[score_position];
               eslmi1 = node_scores[score_index].last_match_index1;
               eslmi2 = node_scores[score_index].last_match_index2;
-              node_score_num_tokens = node_scores[score_index].num_tokens;
+              node_score_num_symbols = node_scores[score_index].num_symbols;
               goto rank_scores_thread_check_overlap_lmi_equal;
             }
           }
         }
         if (new_score_lmi2 < new_score_lmi1) {
-          unsigned int temp_lmi = new_score_lmi1;
+          U32 temp_lmi = new_score_lmi1;
           new_score_lmi1 = new_score_lmi2;
           new_score_lmi2 = temp_lmi;
         }
-        new_score_smi2_m_1 = new_score_lmi2 - num_tokens_in_string;
-        new_score_smi1_m_1 = new_score_lmi1 - num_tokens_in_string;
+        new_score_smi2_m_1 = new_score_lmi2 - num_symbols_in_string;
+        new_score_smi1_m_1 = new_score_lmi1 - num_symbols_in_string;
         score_position = 0;
         while (score_position < new_score_position) {
-          unsigned int score_last_match_index1;
+          U32 score_last_match_index1;
           score_index = node_scores_index[score_position];
-          node_score_num_tokens = node_scores[score_index].num_tokens;
+          node_score_num_symbols = node_scores[score_index].num_symbols;
           score_last_match_index1 = node_scores[score_index].last_match_index1;
-          if (new_score_lmi2 <= score_last_match_index1 - node_score_num_tokens)
+          if (new_score_lmi2 <= score_last_match_index1 - node_score_num_symbols)
             score_position++;
           else {
-            unsigned int score_last_match_index2;
+            U32 score_last_match_index2;
             score_last_match_index2 = node_scores[score_index].last_match_index2;
             if (score_last_match_index2 <= new_score_smi1_m_1)
               score_position++;
             else if (score_last_match_index1 <= new_score_smi2_m_1) {
-              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_tokens) {
-                if ((new_score_lmi2 <= score_last_match_index2 - node_score_num_tokens)
+              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_symbols) {
+                if ((new_score_lmi2 <= score_last_match_index2 - node_score_num_symbols)
                     || (score_last_match_index2 <= new_score_smi2_m_1))
                   score_position++;
                 else
                   goto rank_scores_thread_node_done;
               }
               else if (score_last_match_index1 <= new_score_smi1_m_1) {
-                if (new_score_lmi2 <= score_last_match_index2 - node_score_num_tokens)
+                if (new_score_lmi2 <= score_last_match_index2 - node_score_num_symbols)
                   score_position++;
                 else if (score_last_match_index2 <= new_score_smi2_m_1) {
-                  if (new_score_lmi1 <= score_last_match_index2 - node_score_num_tokens)
+                  if (new_score_lmi1 <= score_last_match_index2 - node_score_num_symbols)
                     score_position++;
                   else
                     goto rank_scores_thread_node_done;
@@ -587,28 +588,28 @@ rank_scores_thread_check_overlap_lmi_equal:
         // no better overlapping score list nodes, so node will be put on the list
         // look for subsequent overlaps that should be removed (only looks for one to avoid min score reduction)
         if (score_position < num_node_scores) {
-          unsigned int eslmi1, eslmi2;
+          U32 eslmi1, eslmi2;
           score_index = node_scores_index[score_position];
           eslmi1 = node_scores[score_index].last_match_index1;
           eslmi2 = node_scores[score_index].last_match_index2;
-          node_score_num_tokens = node_scores[score_index].num_tokens;
+          node_score_num_symbols = node_scores[score_index].num_symbols;
 
 rank_scores_thread_check_overlap_lmi_not_equal:
-          if ((new_score_lmi2 > eslmi1 - node_score_num_tokens)
+          if ((new_score_lmi2 > eslmi1 - node_score_num_symbols)
               && (eslmi2 > new_score_smi1_m_1)
-              && ((new_score_lmi1 > eslmi1 - node_score_num_tokens)
+              && ((new_score_lmi1 > eslmi1 - node_score_num_symbols)
                 || (eslmi1 > new_score_smi2_m_1)
-                || ((new_score_lmi2 > eslmi2 - node_score_num_tokens) && (eslmi2 > new_score_smi2_m_1)))
+                || ((new_score_lmi2 > eslmi2 - node_score_num_symbols) && (eslmi2 > new_score_smi2_m_1)))
               && ((eslmi1 > new_score_smi1_m_1)
-                || (new_score_lmi1 > eslmi2 - node_score_num_tokens)
-                || ((new_score_lmi2 > eslmi2 - node_score_num_tokens) && (eslmi2 > new_score_smi2_m_1))))
+                || (new_score_lmi1 > eslmi2 - node_score_num_symbols)
+                || ((new_score_lmi2 > eslmi2 - node_score_num_symbols) && (eslmi2 > new_score_smi2_m_1))))
             goto rank_scores_thread_move_down;
           if (++score_position == num_node_scores)
             goto rank_scores_thread_check_max;
           score_index = node_scores_index[score_position];
           eslmi1 = node_scores[score_index].last_match_index1;
           eslmi2 = node_scores[score_index].last_match_index2;
-          node_score_num_tokens = node_scores[score_index].num_tokens;
+          node_score_num_symbols = node_scores[score_index].num_symbols;
           goto rank_scores_thread_check_overlap_lmi_not_equal;
         }
 
@@ -630,7 +631,7 @@ rank_scores_thread_move_down:
         // save the new score
         node_scores_index[score_position] = score_index;
         node_scores[score_index].score = score;
-        node_scores[score_index].num_tokens = num_tokens_in_string;
+        node_scores[score_index].num_symbols = num_symbols_in_string;
         node_scores[score_index].last_match_index1 = new_score_lmi1;
         node_scores[score_index].last_match_index2 = new_score_lmi2;
         if (num_node_scores == max_scores)
@@ -641,6 +642,7 @@ rank_scores_thread_node_done:
     }
   } while ((size_t)node_ptr != 1);
   rank_scores_buffer[node_ptrs_num].node_ptrs = 0;
+  return(0);
 }
 
 
@@ -650,30 +652,30 @@ void *rank_scores_thread_UTF8_compliant(void *arg)
   struct string_node *node_ptr, *next_child_ptr;
   double d_score;
   float score;
-  unsigned int *node_last_match_ptr;
-  unsigned short int num_tokens_in_string, score_index, node_score_num_tokens;
-  unsigned short int node_ptrs_num = 0;
+  U32 *node_last_match_ptr;
+  U16 num_symbols_in_string, score_index, node_score_num_symbols;
+  U16 node_ptrs_num = 0;
 
   do {
     node_ptr = (struct string_node *)rank_scores_buffer[node_ptrs_num].node_ptrs;
     if ((size_t)node_ptr > 1) {
       d_score = rank_scores_buffer[node_ptrs_num].score;
       if (d_score >= min_score) {
-        node_last_match_ptr = start_token_ptr + node_ptr->last_match_index;
-        if ((node_ptr->token == (unsigned int)' ') && (*(node_last_match_ptr-1) != (unsigned int)' ')) {
-          d_score *= 0.01;
+        node_last_match_ptr = start_symbol_ptr + node_ptr->last_match_index;
+        if ((node_ptr->symbol == (U32)' ') && (*(node_last_match_ptr-1) != (U32)' ')) {
+          d_score *= 0.03;
           if (d_score < min_score)
             goto rank_scores_thread_UTF8_compliant_node_done;
         }
         else {
-          if (node_ptr->token == 'C')
-            d_score *= 1.7;
-          if (*(node_last_match_ptr - rank_scores_buffer[node_ptrs_num].node_num_tokens) == (unsigned int)'C')
-            d_score *= 1.7;
+          if (node_ptr->symbol == 'C')
+            d_score *= 1.5;
+          if (*(node_last_match_ptr - rank_scores_buffer[node_ptrs_num].node_num_symbols) == (U32)'C')
+            d_score *= 1.5;
         }
         score = (float)d_score;
         // find the position in the score list this node would go in
-        unsigned short int score_position, new_score_position, node_scores_search_size;
+        U16 score_position, new_score_position, node_scores_search_size;
         new_score_position = num_node_scores;
         node_scores_search_size = num_node_scores + 1;
         do {
@@ -685,14 +687,14 @@ void *rank_scores_thread_UTF8_compliant(void *arg)
         } while (node_scores_search_size > 1);
 
         next_child_ptr = string_nodes + node_ptr->child_node_num;
-        num_tokens_in_string = rank_scores_buffer[node_ptrs_num].node_num_tokens;
-        unsigned int new_score_lmi1, new_score_lmi2, new_score_smi1_m_1, new_score_smi2_m_1;
+        num_symbols_in_string = rank_scores_buffer[node_ptrs_num].node_num_symbols;
+        U32 new_score_lmi1, new_score_lmi2, new_score_smi1_m_1, new_score_smi2_m_1;
         // check for overlaps with better score list nodes
         new_score_lmi1 = next_child_ptr->last_match_index - 1;
-        new_score_lmi2 = (unsigned int)(node_last_match_ptr - start_token_ptr);
+        new_score_lmi2 = (U32)(node_last_match_ptr - start_symbol_ptr);
 
         if (new_score_lmi1 == new_score_lmi2) {
-          unsigned int * sibling_node_num_ptr = &next_child_ptr->sibling_node_num[0];
+          U32 * sibling_node_num_ptr = &next_child_ptr->sibling_node_num[0];
           if (*sibling_node_num_ptr)
             new_score_lmi2 = string_nodes[*sibling_node_num_ptr].last_match_index - 1;
           else if (*(sibling_node_num_ptr + 1))
@@ -702,22 +704,22 @@ void *rank_scores_thread_UTF8_compliant(void *arg)
           else if (*(sibling_node_num_ptr + 3))
             new_score_lmi2 = string_nodes[*(sibling_node_num_ptr + 3)].last_match_index - 1;
           else {
-            new_score_smi1_m_1 = new_score_lmi1 - num_tokens_in_string;
+            new_score_smi1_m_1 = new_score_lmi1 - num_symbols_in_string;
             score_position = 0;
             while (score_position < new_score_position) {
-              unsigned int score_last_match_index1;
+              U32 score_last_match_index1;
               score_index = node_scores_index[score_position];
-              node_score_num_tokens = node_scores[score_index].num_tokens;
+              node_score_num_symbols = node_scores[score_index].num_symbols;
               score_last_match_index1 = node_scores[score_index].last_match_index1;
-              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_tokens)
+              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_symbols)
                 score_position++;
               else {
-                unsigned int score_last_match_index2;
+                U32 score_last_match_index2;
                 score_last_match_index2 = node_scores[score_index].last_match_index2;
                 if (score_last_match_index2 <= new_score_smi1_m_1)
                   score_position++;
                 else if ((score_last_match_index1 <= new_score_smi1_m_1)
-                    && (new_score_lmi1 <= score_last_match_index2 - node_score_num_tokens))
+                    && (new_score_lmi1 <= score_last_match_index2 - node_score_num_symbols))
                   score_position++;
                 else
                   goto rank_scores_thread_UTF8_compliant_node_done;
@@ -726,59 +728,59 @@ void *rank_scores_thread_UTF8_compliant(void *arg)
             // no better overlapping score list nodes, so node will be put on the list
             // look for subsequent overlaps that should be removed (only looks for one to avoid min score reduction)
             if (score_position < num_node_scores) {
-              unsigned int eslmi1, eslmi2;
+              U32 eslmi1, eslmi2;
               score_index = node_scores_index[score_position];
               eslmi1 = node_scores[score_index].last_match_index1;
               eslmi2 = node_scores[score_index].last_match_index2;
-              node_score_num_tokens = node_scores[score_index].num_tokens;
+              node_score_num_symbols = node_scores[score_index].num_symbols;
 
 rank_scores_thread_UTF8_compliant_check_overlap_lmi_equal:
-              if ((new_score_lmi1 > eslmi1 - node_score_num_tokens) && (eslmi2 > new_score_smi1_m_1)
-                  && ((eslmi1 > new_score_smi1_m_1) || (new_score_lmi1 > eslmi2 - node_score_num_tokens)))
+              if ((new_score_lmi1 > eslmi1 - node_score_num_symbols) && (eslmi2 > new_score_smi1_m_1)
+                  && ((eslmi1 > new_score_smi1_m_1) || (new_score_lmi1 > eslmi2 - node_score_num_symbols)))
                 goto rank_scores_thread_UTF8_compliant_move_down;
               if (++score_position == num_node_scores)
                 goto rank_scores_thread_UTF8_compliant_check_max;
               score_index = node_scores_index[score_position];
               eslmi1 = node_scores[score_index].last_match_index1;
               eslmi2 = node_scores[score_index].last_match_index2;
-              node_score_num_tokens = node_scores[score_index].num_tokens;
+              node_score_num_symbols = node_scores[score_index].num_symbols;
               goto rank_scores_thread_UTF8_compliant_check_overlap_lmi_equal;
             }
           }
         }
         if (new_score_lmi2 < new_score_lmi1) {
-          unsigned int temp_lmi = new_score_lmi1;
+          U32 temp_lmi = new_score_lmi1;
           new_score_lmi1 = new_score_lmi2;
           new_score_lmi2 = temp_lmi;
         }
-        new_score_smi2_m_1 = new_score_lmi2 - num_tokens_in_string;
-        new_score_smi1_m_1 = new_score_lmi1 - num_tokens_in_string;
+        new_score_smi2_m_1 = new_score_lmi2 - num_symbols_in_string;
+        new_score_smi1_m_1 = new_score_lmi1 - num_symbols_in_string;
         score_position = 0;
         while (score_position < new_score_position) {
-          unsigned int score_last_match_index1;
+          U32 score_last_match_index1;
           score_index = node_scores_index[score_position];
-          node_score_num_tokens = node_scores[score_index].num_tokens;
+          node_score_num_symbols = node_scores[score_index].num_symbols;
           score_last_match_index1 = node_scores[score_index].last_match_index1;
-          if (new_score_lmi2 <= score_last_match_index1 - node_score_num_tokens)
+          if (new_score_lmi2 <= score_last_match_index1 - node_score_num_symbols)
             score_position++;
           else {
-            unsigned int score_last_match_index2;
+            U32 score_last_match_index2;
             score_last_match_index2 = node_scores[score_index].last_match_index2;
             if (score_last_match_index2 <= new_score_smi1_m_1)
               score_position++;
             else if (score_last_match_index1 <= new_score_smi2_m_1) {
-              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_tokens) {
-                if ((new_score_lmi2 <= score_last_match_index2 - node_score_num_tokens)
+              if (new_score_lmi1 <= score_last_match_index1 - node_score_num_symbols) {
+                if ((new_score_lmi2 <= score_last_match_index2 - node_score_num_symbols)
                     || (score_last_match_index2 <= new_score_smi2_m_1))
                   score_position++;
                 else
                   goto rank_scores_thread_UTF8_compliant_node_done;
               }
               else if (score_last_match_index1 <= new_score_smi1_m_1) {
-                if (new_score_lmi2 <= score_last_match_index2 - node_score_num_tokens)
+                if (new_score_lmi2 <= score_last_match_index2 - node_score_num_symbols)
                   score_position++;
                 else if (score_last_match_index2 <= new_score_smi2_m_1) {
-                  if (new_score_lmi1 <= score_last_match_index2 - node_score_num_tokens)
+                  if (new_score_lmi1 <= score_last_match_index2 - node_score_num_symbols)
                     score_position++;
                   else
                     goto rank_scores_thread_UTF8_compliant_node_done;
@@ -796,28 +798,28 @@ rank_scores_thread_UTF8_compliant_check_overlap_lmi_equal:
         // no better overlapping score list nodes, so node will be put on the list
         // look for subsequent overlaps that should be removed (only looks for one to avoid min score reduction)
         if (score_position < num_node_scores) {
-          unsigned int eslmi1, eslmi2;
+          U32 eslmi1, eslmi2;
           score_index = node_scores_index[score_position];
           eslmi1 = node_scores[score_index].last_match_index1;
           eslmi2 = node_scores[score_index].last_match_index2;
-          node_score_num_tokens = node_scores[score_index].num_tokens;
+          node_score_num_symbols = node_scores[score_index].num_symbols;
 
 rank_scores_thread_UTF8_compliant_check_overlap_lmi_not_equal:
-          if ((new_score_lmi2 > eslmi1 - node_score_num_tokens)
+          if ((new_score_lmi2 > eslmi1 - node_score_num_symbols)
               && (eslmi2 > new_score_smi1_m_1)
-              && ((new_score_lmi1 > eslmi1 - node_score_num_tokens)
+              && ((new_score_lmi1 > eslmi1 - node_score_num_symbols)
                 || (eslmi1 > new_score_smi2_m_1)
-                || ((new_score_lmi2 > eslmi2 - node_score_num_tokens) && (eslmi2 > new_score_smi2_m_1)))
+                || ((new_score_lmi2 > eslmi2 - node_score_num_symbols) && (eslmi2 > new_score_smi2_m_1)))
               && ((eslmi1 > new_score_smi1_m_1)
-                || (new_score_lmi1 > eslmi2 - node_score_num_tokens)
-                || ((new_score_lmi2 > eslmi2 - node_score_num_tokens) && (eslmi2 > new_score_smi2_m_1))))
+                || (new_score_lmi1 > eslmi2 - node_score_num_symbols)
+                || ((new_score_lmi2 > eslmi2 - node_score_num_symbols) && (eslmi2 > new_score_smi2_m_1))))
             goto rank_scores_thread_UTF8_compliant_move_down;
           if (++score_position == num_node_scores)
             goto rank_scores_thread_UTF8_compliant_check_max;
           score_index = node_scores_index[score_position];
           eslmi1 = node_scores[score_index].last_match_index1;
           eslmi2 = node_scores[score_index].last_match_index2;
-          node_score_num_tokens = node_scores[score_index].num_tokens;
+          node_score_num_symbols = node_scores[score_index].num_symbols;
           goto rank_scores_thread_UTF8_compliant_check_overlap_lmi_not_equal;
         }
 
@@ -839,7 +841,7 @@ rank_scores_thread_UTF8_compliant_move_down:
         // save the new score
         node_scores_index[score_position] = score_index;
         node_scores[score_index].score = score;
-        node_scores[score_index].num_tokens = num_tokens_in_string;
+        node_scores[score_index].num_symbols = num_symbols_in_string;
         node_scores[score_index].last_match_index1 = new_score_lmi1;
         node_scores[score_index].last_match_index2 = new_score_lmi2;
         if (num_node_scores == max_scores)
@@ -850,77 +852,57 @@ rank_scores_thread_UTF8_compliant_node_done:
     }
   } while ((size_t)node_ptr != 1);
   rank_scores_buffer[node_ptrs_num].node_ptrs = 0;
+  return(0);
 }
 
 
 
-void score_node(struct string_node* node_ptr, double log_expected_match_ratio)
+void score_node(struct string_node* node_ptr, double string_entropy)
 {
   struct string_node *next_child_ptr;
-  unsigned short int num_tokens_in_string, level;
-  num_tokens_in_string = 2;
+  U16 num_symbols_in_string, level;
+  num_symbols_in_string = 2;
   level = 0;
 
   while (1) {
 top_score_loop:
     node_instances = node_ptr->instances;
     if (node_instances >= 2)  {
-      node_data[level].log_expected_match_ratio = log_expected_match_ratio;
-      log_expected_match_ratio += log_token_count_minus_log_num_tokens[node_ptr->token];
+      node_data[level].string_entropy = string_entropy;
+      string_entropy += symbol_entropy[node_ptr->symbol];
       next_child_ptr = &string_nodes[node_ptr->child_node_num];
 
-      if ((node_instances != next_child_ptr->instances) || (*(start_token_ptr + node_ptr->last_match_index + 1) == 0x20)) {
+      if ((node_instances != next_child_ptr->instances) || (*(start_symbol_ptr + node_ptr->last_match_index + 1) == 0x20)) {
         // calculate this child's score
-        if (node_instances == 2) {
-          double delta_match_ratio = log_match_ratios[2] - log_expected_match_ratio;
-          double d_score = delta_match_ratio - cutoff_score;
-          if (d_score >= 0.0) {
-double delta_margin = delta_match_ratio - 1.4;
-d_score *= delta_match_ratio;
-d_score *= d_score * delta_margin * delta_margin * delta_margin * d_num_tokens_in_string_inv_pow5[num_tokens_in_string];
-            if (d_score >= min_score) {
+        double repeats = (double)(node_instances - 1);
+        double profit_per_substitution;
+        if (node_instances < NUM_PRECALCULATED_MATCH_RATIO_LOGS)
+          profit_per_substitution = string_entropy - new_symbol_cost[node_instances];
+        else
+          profit_per_substitution = string_entropy - (log2_num_symbols_plus_substitution_cost - log2(repeats));
+        if (profit_per_substitution >= 0.0) {
+          double total_bit_savings_minus_production_cost = repeats * profit_per_substitution - production_cost;
+          if (total_bit_savings_minus_production_cost > 0.0) {
+            double profit_ratio = profit_per_substitution / string_entropy;
+            double score = total_bit_savings_minus_production_cost * pow(profit_ratio, profit_ratio_power);
+            if (score >= min_score) {
               if ((node_ptrs_num & 0xFFF) == 0)
-                while (rank_scores_buffer[(unsigned short int)(node_ptrs_num + 0x1000)].node_ptrs != 0);
-              rank_scores_buffer[node_ptrs_num].score = d_score;
-              rank_scores_buffer[node_ptrs_num].node_num_tokens = num_tokens_in_string;
+                while (rank_scores_buffer[(U16)(node_ptrs_num + 0x1000)].node_ptrs != 0);
+              rank_scores_buffer[node_ptrs_num].score = score;
+              rank_scores_buffer[node_ptrs_num].node_num_symbols = num_symbols_in_string;
               rank_scores_buffer[node_ptrs_num++].node_ptrs = (size_t)node_ptr;
-            }
-          }
-        }
-        else {
-          double delta_match_ratio;
-          double d_node_instances_m_1 = (double)(node_instances - 1);
-          if (node_instances < NUM_PRECALCULATED_MATCH_RATIO_LOGS)
-            delta_match_ratio = log_match_ratios[node_instances] - log_expected_match_ratio;
-          else
-            delta_match_ratio = log2(d_node_instances_m_1 * d_num_token_inv) - log_expected_match_ratio;
-//          if (delta_match_ratio > 1.35) {
-          if (delta_match_ratio >= 1.4) {
-double delta_margin = delta_match_ratio - 1.4;
-            double d_score = d_node_instances_m_1 * delta_match_ratio;
-            if (d_score > cutoff_score) {
-              d_score -= cutoff_score;
-d_score *= delta_match_ratio;
-d_score *= d_score * delta_margin * delta_margin * delta_margin * d_num_tokens_in_string_inv_pow5[num_tokens_in_string];
-              if (d_score >= min_score) {
-                if ((node_ptrs_num & 0xFFF) == 0)
-                  while (rank_scores_buffer[(unsigned short int)(node_ptrs_num + 0x1000)].node_ptrs != 0);
-                rank_scores_buffer[node_ptrs_num].score = d_score;
-                rank_scores_buffer[node_ptrs_num].node_num_tokens = num_tokens_in_string;
-                rank_scores_buffer[node_ptrs_num++].node_ptrs = (size_t)node_ptr;
-              }
             }
           }
         }
       }
       node_data[level].node_ptr = node_ptr;
-      node_data[level].num_tokens_in_string = num_tokens_in_string++;
+      node_data[level].num_symbols_in_string = num_symbols_in_string++;
       node_data[level++].next_sibling = 0;
       node_ptr = next_child_ptr;
       goto top_score_loop;
     }
 
-    unsigned int sib_node_num = node_ptr->sibling_node_num[0];
+    U32 sib_node_num = node_ptr->sibling_node_num[0];
     if (sib_node_num == 0) {
       sib_node_num = node_ptr->sibling_node_num[1];
       if (sib_node_num == 0) {
@@ -929,39 +911,39 @@ d_score *= d_score * delta_margin * delta_margin * delta_margin * d_num_tokens_i
           sib_node_num = node_ptr->sibling_node_num[3];
           if (sib_node_num == 0) {
             while (level--) {
-              unsigned char sibling_number = node_data[level].next_sibling;
+              U8 sibling_number = node_data[level].next_sibling;
               node_ptr = node_data[level].node_ptr;
               if (sibling_number != 3) {
                 if (sibling_number != 2) {
                   if (sibling_number == 0) {
                     if (node_ptr->sibling_node_num[0]) {
                       node_ptr = &string_nodes[node_ptr->sibling_node_num[0]];
-                      num_tokens_in_string = node_data[level].num_tokens_in_string;
-                      log_expected_match_ratio = node_data[level].log_expected_match_ratio;
+                      num_symbols_in_string = node_data[level].num_symbols_in_string;
+                      string_entropy = node_data[level].string_entropy;
                       node_data[level++].next_sibling = 1;
                       goto top_score_loop;
                     }
                   }
                   if (node_ptr->sibling_node_num[1]) {
                     node_ptr = &string_nodes[node_ptr->sibling_node_num[1]];
-                    num_tokens_in_string = node_data[level].num_tokens_in_string;
-                    log_expected_match_ratio = node_data[level].log_expected_match_ratio;
+                    num_symbols_in_string = node_data[level].num_symbols_in_string;
+                    string_entropy = node_data[level].string_entropy;
                     node_data[level++].next_sibling = 2;
                     goto top_score_loop;
                   }
                 }
                 if (node_ptr->sibling_node_num[2]) {
                   node_ptr = &string_nodes[node_ptr->sibling_node_num[2]];
-                  num_tokens_in_string = node_data[level].num_tokens_in_string;
-                  log_expected_match_ratio = node_data[level].log_expected_match_ratio;
+                  num_symbols_in_string = node_data[level].num_symbols_in_string;
+                  string_entropy = node_data[level].string_entropy;
                   node_data[level++].next_sibling = 3;
                   goto top_score_loop;
                 }
               }
               if (node_ptr->sibling_node_num[3]) {
                 node_ptr = &string_nodes[node_ptr->sibling_node_num[3]];
-                num_tokens_in_string = node_data[level].num_tokens_in_string;
-                log_expected_match_ratio = node_data[level].log_expected_match_ratio;
+                num_symbols_in_string = node_data[level].num_symbols_in_string;
+                string_entropy = node_data[level].string_entropy;
                 goto top_score_loop;
               }
             }
@@ -972,24 +954,24 @@ d_score *= d_score * delta_margin * delta_margin * delta_margin * d_num_tokens_i
         }
         else {
           node_data[level].node_ptr = node_ptr;
-          node_data[level].num_tokens_in_string = num_tokens_in_string;
-          node_data[level].log_expected_match_ratio = log_expected_match_ratio;
+          node_data[level].num_symbols_in_string = num_symbols_in_string;
+          node_data[level].string_entropy = string_entropy;
           node_data[level++].next_sibling = 3;
           node_ptr = &string_nodes[sib_node_num];
         }
       }
       else {
         node_data[level].node_ptr = node_ptr;
-        node_data[level].num_tokens_in_string = num_tokens_in_string;
-        node_data[level].log_expected_match_ratio = log_expected_match_ratio;
+        node_data[level].num_symbols_in_string = num_symbols_in_string;
+        node_data[level].string_entropy = string_entropy;
         node_data[level++].next_sibling = 2;
         node_ptr = &string_nodes[sib_node_num];
       }
     }
     else {
       node_data[level].node_ptr = node_ptr;
-      node_data[level].num_tokens_in_string = num_tokens_in_string;
-      node_data[level].log_expected_match_ratio = log_expected_match_ratio;
+      node_data[level].num_symbols_in_string = num_symbols_in_string;
+      node_data[level].string_entropy = string_entropy;
       node_data[level++].next_sibling = 1;
       node_ptr = &string_nodes[sib_node_num];
     }
@@ -1001,70 +983,70 @@ d_score *= d_score * delta_margin * delta_margin * delta_margin * d_num_tokens_i
 void *build_lcp_thread(void *arg)
 {
   struct lcp_thread_data *thread_data_ptr;
-  unsigned int min_token, max_token;
-  unsigned int next_string_node_num, string_node_num_limit;
-  unsigned int *in_token_ptr, *recent_stop_token_ptr;
+  U32 min_symbol, max_symbol, next_string_node_num, string_node_num_limit;
+  U32 *in_symbol_ptr, *recent_stop_symbol_ptr;
 
   thread_data_ptr = (struct lcp_thread_data *)arg;
-  in_token_ptr = (unsigned int *)min_token_ptr;
-  min_token = thread_data_ptr->min_token;
-  max_token = thread_data_ptr->max_token;
+  in_symbol_ptr = (U32 *)min_symbol_ptr;
+  min_symbol = thread_data_ptr->min_symbol;
+  max_symbol = thread_data_ptr->max_symbol;
   next_string_node_num = thread_data_ptr->first_string_node_num;
   string_node_num_limit = thread_data_ptr->string_nodes_limit - MAX_STRING_LENGTH;
 
-  while ((unsigned int * volatile)max_token_ptr != in_token_ptr) {
-    recent_stop_token_ptr = (unsigned int *)stop_token_ptr;
-    while (in_token_ptr != recent_stop_token_ptr) {
+  while ((U32 * volatile)max_symbol_ptr != in_symbol_ptr) {
+    recent_stop_symbol_ptr = (U32 *)stop_symbol_ptr;
+    while (in_symbol_ptr != recent_stop_symbol_ptr) {
       if (next_string_node_num < string_node_num_limit) {
-        unsigned int this_token;
-        this_token = *in_token_ptr++;
-        if ((this_token >= min_token) && (this_token <= max_token))
-          add_suffix(this_token,in_token_ptr,&next_string_node_num);
+        U32 this_symbol;
+        this_symbol = *in_symbol_ptr++;
+        if ((this_symbol >= min_symbol) && (this_symbol <= max_symbol))
+          add_suffix(this_symbol,in_symbol_ptr,&next_string_node_num);
       }
       else
-        in_token_ptr = recent_stop_token_ptr;
+        in_symbol_ptr = recent_stop_symbol_ptr;
     }
-    thread_data_ptr->current_token_ptr = in_token_ptr;
+    thread_data_ptr->current_symbol_ptr = in_symbol_ptr;
   }
+  return(0);
 }
 
 
 
-#define score_nodes(max_token) \
+#define score_nodes(max_symbol) \
 { \
-  while (i1 <= max_token) { \
+  while (i1 <= max_symbol) { \
     if (*base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     if (*++base_node_child_num_ptr) \
-      score_node(&string_nodes[*base_node_child_num_ptr],log_token_count_minus_log_num_tokens[i1]); \
+      score_node(&string_nodes[*base_node_child_num_ptr],symbol_entropy[i1]); \
     ++base_node_child_num_ptr; \
     i1++; \
   } \
@@ -1077,71 +1059,71 @@ void *overlap_check_thread(void *arg)
 {
   struct overlap_check_data *thread_data_ptr;
   struct match_node *match_node_ptr;
-  unsigned int this_token, prior_match_score_number[MAX_PRIOR_MATCHES];
-  unsigned int *prior_match_end_ptr[MAX_PRIOR_MATCHES];
-  unsigned int *in_token_ptr;
-  unsigned int *end_token_ptr;
-  unsigned int num_prior_matches = 0;
+  U32 this_symbol, prior_match_score_number[MAX_PRIOR_MATCHES];
+  U32 *prior_match_end_ptr[MAX_PRIOR_MATCHES];
+  U32 *in_symbol_ptr;
+  U32 *end_symbol_ptr;
+  U32 num_prior_matches = 0;
 
   thread_data_ptr = (struct overlap_check_data *)arg;
-  in_token_ptr = thread_data_ptr->start_token_ptr;
-  end_token_ptr = thread_data_ptr->stop_token_ptr;
+  in_symbol_ptr = thread_data_ptr->start_symbol_ptr;
+  end_symbol_ptr = thread_data_ptr->stop_symbol_ptr;
 
 thread_overlap_check_loop_no_match:
-  if (in_token_ptr == end_token_ptr)
-    goto thread_overlap_check_loop_end;
-  this_token = *in_token_ptr++;
-  if ((int)this_token < 0)
+  if (in_symbol_ptr == end_symbol_ptr)
+    return(0);
+  this_symbol = *in_symbol_ptr++;
+  if ((int)this_symbol < 0)
     goto thread_overlap_check_loop_no_match;
-  if (match_nodes[this_token].num_tokens == 0)
+  if (match_nodes[this_symbol].num_symbols == 0)
     goto thread_overlap_check_loop_no_match;
-  match_node_ptr = &match_nodes[this_token];
+  match_node_ptr = &match_nodes[this_symbol];
 
 thread_overlap_check_loop_match:
-  if (in_token_ptr == end_token_ptr)
-    goto thread_overlap_check_loop_end;
-  this_token = *in_token_ptr++;
-  if ((int)this_token < 0)
+  if (in_symbol_ptr == end_symbol_ptr)
+    return(0);
+  this_symbol = *in_symbol_ptr++;
+  if ((int)this_symbol < 0)
     goto thread_overlap_check_loop_no_match;
   match_node_ptr = match_node_ptr->child_ptr;
-  if (this_token != match_node_ptr->token) {
-    unsigned int shifted_token = this_token;
+  if (this_symbol != match_node_ptr->symbol) {
+    U32 shifted_symbol = this_symbol;
     do {
-      if (match_node_ptr->sibling_node_num[shifted_token & 0xF] != 0) {
-        match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_token & 0xF]];
-        shifted_token = shifted_token >> 4;
+      if (match_node_ptr->sibling_node_num[shifted_symbol & 0xF] != 0) {
+        match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_symbol & 0xF]];
+        shifted_symbol = shifted_symbol >> 4;
       }
       else {
         if (match_node_ptr->miss_ptr == 0) {
-          if (match_nodes[this_token].num_tokens == 0)
+          if (match_nodes[this_symbol].num_symbols == 0)
             goto thread_overlap_check_loop_no_match;
-          match_node_ptr = &match_nodes[this_token];
+          match_node_ptr = &match_nodes[this_symbol];
           goto thread_overlap_check_loop_match;
         }
         else {
           match_node_ptr = match_node_ptr->miss_ptr;
-          shifted_token = this_token;
+          shifted_symbol = this_symbol;
         }
       }
-    } while (this_token != match_node_ptr->token);
+    } while (this_symbol != match_node_ptr->symbol);
   }
   if (match_node_ptr->child_ptr)
     goto thread_overlap_check_loop_match;
 
   // no child, so found a match - check for overlaps
-  unsigned int i1;
-  unsigned char found_same_score_prior_match = 0;
-  unsigned int node_score_number = match_node_ptr->score_number;
-  unsigned int prior_match_number = 0;
+  U32 i1;
+  U8 found_same_score_prior_match = 0;
+  U32 node_score_number = match_node_ptr->score_number;
+  U32 prior_match_number = 0;
   while (prior_match_number < num_prior_matches) {
-    if (in_token_ptr - match_node_ptr->num_tokens > prior_match_end_ptr[prior_match_number]) {
+    if (in_symbol_ptr - match_node_ptr->num_symbols > prior_match_end_ptr[prior_match_number]) {
       num_prior_matches--;
       for (i1 = prior_match_number ; i1 < num_prior_matches ; i1++) {
         prior_match_end_ptr[i1] = prior_match_end_ptr[i1+1];
         prior_match_score_number[i1] = prior_match_score_number[i1+1];
       }
     }
-    else { // overlapping token substitution strings, so invalidate the lower score
+    else { // overlapping symbol substitution strings, so invalidate the lower score
       if (prior_match_score_number[prior_match_number] > node_score_number)
         node_scores_bad[prior_match_score_number[prior_match_number]] = 1;
       else if (prior_match_score_number[prior_match_number] != node_score_number)
@@ -1153,74 +1135,72 @@ thread_overlap_check_loop_match:
   }
   match_node_ptr = match_node_ptr->hit_ptr;
   if (found_same_score_prior_match == 0) {
-    prior_match_end_ptr[num_prior_matches] = in_token_ptr - 1;
+    prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
     prior_match_score_number[num_prior_matches++] = node_score_number;
   }
   if (match_node_ptr == 0)
     goto thread_overlap_check_loop_no_match;
   else
     goto thread_overlap_check_loop_match;
-
-thread_overlap_check_loop_end:
-  match_node_ptr = 0;
+  return(0);
 }
 
 
 
 void *substitute_thread(void *arg)
 {
-  unsigned int * end_data_ptr;
-  unsigned int * near_end_data_ptr;
-  unsigned int data = 0;
-  unsigned short int substitute_data_index = 0;
-  unsigned int * old_data_ptr = start_token_ptr;
+  U32 * end_data_ptr;
+  U32 * near_end_data_ptr;
+  U32 data = 0;
+  U16 substitute_data_index = 0;
+  U32 * old_data_ptr = start_symbol_ptr;
 
   while (data != 0xFFFFFFFF) {
     if (data) {
       if ((int)data > 0) {
 substitute_copy:
-        end_data_ptr = out_token_ptr + data;
+        end_data_ptr = out_symbol_ptr + data;
         near_end_data_ptr = end_data_ptr - 32;
-        while (out_token_ptr < near_end_data_ptr) {
-          *(unsigned long long *)out_token_ptr = *(unsigned long long *)old_data_ptr;
-          *((unsigned long long *)out_token_ptr + 1) = *((unsigned long long *)old_data_ptr + 1);
-          *((unsigned long long *)out_token_ptr + 2) = *((unsigned long long *)old_data_ptr + 2);
-          *((unsigned long long *)out_token_ptr + 3) = *((unsigned long long *)old_data_ptr + 3);
-          *((unsigned long long *)out_token_ptr + 4) = *((unsigned long long *)old_data_ptr + 4);
-          *((unsigned long long *)out_token_ptr + 5) = *((unsigned long long *)old_data_ptr + 5);
-          *((unsigned long long *)out_token_ptr + 6) = *((unsigned long long *)old_data_ptr + 6);
-          *((unsigned long long *)out_token_ptr + 7) = *((unsigned long long *)old_data_ptr + 7);
-          *((unsigned long long *)out_token_ptr + 8) = *((unsigned long long *)old_data_ptr + 8);
-          *((unsigned long long *)out_token_ptr + 9) = *((unsigned long long *)old_data_ptr + 9);
-          *((unsigned long long *)out_token_ptr + 10) = *((unsigned long long *)old_data_ptr + 10);
-          *((unsigned long long *)out_token_ptr + 11) = *((unsigned long long *)old_data_ptr + 11);
-          *((unsigned long long *)out_token_ptr + 12) = *((unsigned long long *)old_data_ptr + 12);
-          *((unsigned long long *)out_token_ptr + 13) = *((unsigned long long *)old_data_ptr + 13);
-          *((unsigned long long *)out_token_ptr + 14) = *((unsigned long long *)old_data_ptr + 14);
-          *((unsigned long long *)out_token_ptr + 15) = *((unsigned long long *)old_data_ptr + 15);
+        while (out_symbol_ptr < near_end_data_ptr) {
+          *(U64 *)out_symbol_ptr = *(U64 *)old_data_ptr;
+          *((U64 *)out_symbol_ptr + 1) = *((U64 *)old_data_ptr + 1);
+          *((U64 *)out_symbol_ptr + 2) = *((U64 *)old_data_ptr + 2);
+          *((U64 *)out_symbol_ptr + 3) = *((U64 *)old_data_ptr + 3);
+          *((U64 *)out_symbol_ptr + 4) = *((U64 *)old_data_ptr + 4);
+          *((U64 *)out_symbol_ptr + 5) = *((U64 *)old_data_ptr + 5);
+          *((U64 *)out_symbol_ptr + 6) = *((U64 *)old_data_ptr + 6);
+          *((U64 *)out_symbol_ptr + 7) = *((U64 *)old_data_ptr + 7);
+          *((U64 *)out_symbol_ptr + 8) = *((U64 *)old_data_ptr + 8);
+          *((U64 *)out_symbol_ptr + 9) = *((U64 *)old_data_ptr + 9);
+          *((U64 *)out_symbol_ptr + 10) = *((U64 *)old_data_ptr + 10);
+          *((U64 *)out_symbol_ptr + 11) = *((U64 *)old_data_ptr + 11);
+          *((U64 *)out_symbol_ptr + 12) = *((U64 *)old_data_ptr + 12);
+          *((U64 *)out_symbol_ptr + 13) = *((U64 *)old_data_ptr + 13);
+          *((U64 *)out_symbol_ptr + 14) = *((U64 *)old_data_ptr + 14);
+          *((U64 *)out_symbol_ptr + 15) = *((U64 *)old_data_ptr + 15);
           old_data_ptr += 32;
-          out_token_ptr += 32;
+          out_symbol_ptr += 32;
         }
-        while (out_token_ptr < end_data_ptr - 1) {
-          *(unsigned long long *)out_token_ptr = *(unsigned long long *)old_data_ptr;
+        while (out_symbol_ptr < end_data_ptr - 1) {
+          *(U64 *)out_symbol_ptr = *(U64 *)old_data_ptr;
           old_data_ptr += 2;
-          out_token_ptr += 2;
+          out_symbol_ptr += 2;
         }
-        while (out_token_ptr != end_data_ptr)
-          *out_token_ptr++ = *old_data_ptr++;
+        while (out_symbol_ptr != end_data_ptr)
+          *out_symbol_ptr++ = *old_data_ptr++;
         substitute_data[substitute_data_index++] = 0;
         data = substitute_data[substitute_data_index];
         if ((int)data < (int)0xFFFFFFFF)
-          goto substitute_new_token;
+          goto substitute_new_symbol;
       }
       else {
-substitute_new_token:
+substitute_new_symbol:
         substitute_data[substitute_data_index++] = 0;
         old_data_ptr += (size_t)(data - 0x80000000);
         while (substitute_data[substitute_data_index] == 0);
-        unsigned int symbol = substitute_data[substitute_data_index];
-        token_count[symbol]++;
-        *out_token_ptr++ = symbol;
+        U32 symbol = substitute_data[substitute_data_index];
+        symbol_count[symbol]++;
+        *out_symbol_ptr++ = symbol;
         substitute_data[substitute_data_index++] = 0;
         data = substitute_data[substitute_data_index];
         if ((int)data > 0)
@@ -1231,6 +1211,7 @@ substitute_new_token:
       data = substitute_data[substitute_data_index];
   }
   substitute_data[substitute_data_index] = 0;
+  return(0);
 }
 
 
@@ -1239,112 +1220,112 @@ substitute_new_token:
 void *find_substitutions_thread(void *arg)
 {
   struct match_node *match_node_ptr;
-  unsigned int this_token, node_score_number;
+  U32 this_symbol, node_score_number;
   struct find_substitutions_data * thread_data_ptr = (struct find_substitutions_data *)arg;
-  unsigned int * in_token_ptr = (unsigned int *)thread_data_ptr->start_token_ptr;
-  unsigned int * end_token_ptr = thread_data_ptr->stop_token_ptr;
-  unsigned int substitute_index = 0;
-  unsigned int num_tokens_to_copy = 0;
+  U32 * in_symbol_ptr = (U32 *)thread_data_ptr->start_symbol_ptr;
+  U32 * end_symbol_ptr = thread_data_ptr->stop_symbol_ptr;
+  U32 substitute_index = 0;
+  U32 num_symbols_to_copy = 0;
 
   thread_data_ptr->extra_match_symbols = 0;
-  if (in_token_ptr == end_token_ptr)
-    goto thread_token_substitution_loop_end;
-  this_token = *in_token_ptr++;
-  if ((int)this_token >= 0) {
-thread_token_substitution_loop_no_match_with_symbol:
-    match_node_ptr = &match_nodes[this_token];
-    if (match_node_ptr->num_tokens) {
-      this_token = *in_token_ptr++;
-      if ((int)this_token >= 0) {
+  if (in_symbol_ptr == end_symbol_ptr)
+    goto thread_symbol_substitution_loop_end;
+  this_symbol = *in_symbol_ptr++;
+  if ((int)this_symbol >= 0) {
+thread_symbol_substitution_loop_no_match_with_symbol:
+    match_node_ptr = &match_nodes[this_symbol];
+    if (match_node_ptr->num_symbols) {
+      this_symbol = *in_symbol_ptr++;
+      if ((int)this_symbol >= 0) {
         if (match_node_ptr->child_ptr == 0) {
-          if (num_tokens_to_copy >= 100000) {
+          if (num_symbols_to_copy >= 100000) {
             if (substitute_index == 0x400000) {
               thread_data_ptr->num_substitutions += 0x400000;
               substitute_index = 0;
               while (thread_data_ptr->data[0x3FFFFF]);
             }
-            thread_data_ptr->data[substitute_index++] = num_tokens_to_copy;
-            num_tokens_to_copy = 0;
+            thread_data_ptr->data[substitute_index++] = num_symbols_to_copy;
+            num_symbols_to_copy = 0;
           }
-          if (in_token_ptr == end_token_ptr)
-            goto thread_token_substitution_loop_end;
-          this_token = *in_token_ptr++;
-          if ((int)this_token >= 0)
-            goto thread_token_substitution_loop_no_match_with_symbol;
-          num_tokens_to_copy++;
-          if (in_token_ptr == end_token_ptr)
-            goto thread_token_substitution_loop_end;
-          this_token = *in_token_ptr++;
-          goto thread_token_substitution_loop_no_match_with_symbol;
+          if (in_symbol_ptr == end_symbol_ptr)
+            goto thread_symbol_substitution_loop_end;
+          this_symbol = *in_symbol_ptr++;
+          if ((int)this_symbol >= 0)
+            goto thread_symbol_substitution_loop_no_match_with_symbol;
+          num_symbols_to_copy++;
+          if (in_symbol_ptr == end_symbol_ptr)
+            goto thread_symbol_substitution_loop_end;
+          this_symbol = *in_symbol_ptr++;
+          goto thread_symbol_substitution_loop_no_match_with_symbol;
         }
-thread_token_substitution_loop_match_with_child:
+thread_symbol_substitution_loop_match_with_child:
         match_node_ptr = match_node_ptr->child_ptr;
-        if (this_token != match_node_ptr->token) {
-          unsigned int sibling_nibble = this_token;
+        if (this_symbol != match_node_ptr->symbol) {
+          U32 sibling_nibble = this_symbol;
           do {
             if (match_node_ptr->sibling_node_num[sibling_nibble & 0xF]) {
               match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[sibling_nibble & 0xF]];
               sibling_nibble = sibling_nibble >> 4;
             }
-            else { // no match, so use miss node and output missed tokens
+            else { // no match, so use miss node and output missed symbols
               if (match_node_ptr->miss_ptr == 0) {
-                if (match_nodes[this_token].num_tokens) {
-                  if (in_token_ptr > end_token_ptr) {
-                    num_tokens_to_copy += match_node_ptr->num_tokens - (in_token_ptr - end_token_ptr);
-                    goto thread_token_substitution_loop_end;
+                if (match_nodes[this_symbol].num_symbols) {
+                  if (in_symbol_ptr > end_symbol_ptr) {
+                    num_symbols_to_copy += match_node_ptr->num_symbols - (in_symbol_ptr - end_symbol_ptr);
+                    goto thread_symbol_substitution_loop_end;
                   }
                   sibling_nibble = sibling_nibble >> 4;
-                  num_tokens_to_copy += match_node_ptr->num_tokens - 1;
-                  match_node_ptr = &match_nodes[this_token];
+                  num_symbols_to_copy += match_node_ptr->num_symbols - 1;
+                  match_node_ptr = &match_nodes[this_symbol];
                 }
                 else {
-                  if (in_token_ptr >= end_token_ptr) {
-                    num_tokens_to_copy += match_node_ptr->num_tokens - (in_token_ptr - end_token_ptr);
-                    goto thread_token_substitution_loop_end;
+                  if (in_symbol_ptr >= end_symbol_ptr) {
+                    num_symbols_to_copy += match_node_ptr->num_symbols - (in_symbol_ptr - end_symbol_ptr);
+                    goto thread_symbol_substitution_loop_end;
                   }
-                  num_tokens_to_copy += match_node_ptr->num_tokens;
-                  if (num_tokens_to_copy >= 100000) {
+                  num_symbols_to_copy += match_node_ptr->num_symbols;
+                  if (num_symbols_to_copy >= 100000) {
                     if (substitute_index == 0x400000) {
                       thread_data_ptr->num_substitutions += 0x400000;
                       substitute_index = 0;
                       while (thread_data_ptr->data[0x3FFFFF]);
                     }
-                    thread_data_ptr->data[substitute_index++] = num_tokens_to_copy;
-                    num_tokens_to_copy = 0;
+                    thread_data_ptr->data[substitute_index++] = num_symbols_to_copy;
+                    num_symbols_to_copy = 0;
                   }
-                  if (in_token_ptr == end_token_ptr)
-                    goto thread_token_substitution_loop_end;
-                  this_token = *in_token_ptr++;
-                  if ((int)this_token >= 0)
-                    goto thread_token_substitution_loop_no_match_with_symbol;
-                  num_tokens_to_copy++;
-                  if (in_token_ptr == end_token_ptr)
-                    goto thread_token_substitution_loop_end;
-                  this_token = *in_token_ptr++;
-                  goto thread_token_substitution_loop_no_match_with_symbol;
+                  if (in_symbol_ptr == end_symbol_ptr)
+                    goto thread_symbol_substitution_loop_end;
+                  this_symbol = *in_symbol_ptr++;
+                  if ((int)this_symbol >= 0)
+                    goto thread_symbol_substitution_loop_no_match_with_symbol;
+                  num_symbols_to_copy++;
+                  if (in_symbol_ptr == end_symbol_ptr)
+                    goto thread_symbol_substitution_loop_end;
+                  this_symbol = *in_symbol_ptr++;
+                  goto thread_symbol_substitution_loop_no_match_with_symbol;
                 }
               }
               else {
-                num_tokens_to_copy += match_node_ptr->num_tokens - match_node_ptr->miss_ptr->num_tokens;
-                if (in_token_ptr - match_node_ptr->miss_ptr->num_tokens >= end_token_ptr) {
-                  num_tokens_to_copy -= in_token_ptr - end_token_ptr - match_node_ptr->miss_ptr->num_tokens;
-                  goto thread_token_substitution_loop_end;
+                num_symbols_to_copy += match_node_ptr->num_symbols - match_node_ptr->miss_ptr->num_symbols;
+                if (in_symbol_ptr - match_node_ptr->miss_ptr->num_symbols >= end_symbol_ptr) {
+                  num_symbols_to_copy -= in_symbol_ptr - end_symbol_ptr - match_node_ptr->miss_ptr->num_symbols;
+                  goto thread_symbol_substitution_loop_end;
                 }
                 match_node_ptr = match_node_ptr->miss_ptr;
-                sibling_nibble = this_token;
+                sibling_nibble = this_symbol;
               }
             }
-          } while (this_token != match_node_ptr->token);
+          } while (this_symbol != match_node_ptr->symbol);
         }
         if (match_node_ptr->child_ptr == 0) { // no child, so found a match
-          if (num_tokens_to_copy) {
+          if (num_symbols_to_copy) {
             if (substitute_index == 0x400000) {
               thread_data_ptr->num_substitutions += 0x400000;
               substitute_index = 0;
               while (thread_data_ptr->data[0x3FFFFF]);
             }
-            thread_data_ptr->data[substitute_index++] = num_tokens_to_copy;
-            num_tokens_to_copy = 0;
+            thread_data_ptr->data[substitute_index++] = num_symbols_to_copy;
+            num_symbols_to_copy = 0;
           }
           node_score_number = match_node_ptr->score_number;
           if (substitute_index == 0x400000) {
@@ -1352,105 +1333,106 @@ thread_token_substitution_loop_match_with_child:
             substitute_index = 0;
             while (thread_data_ptr->data[0x3FFFFF]);
           }
-          thread_data_ptr->data[substitute_index++] = 0x80000000 + match_node_ptr->num_tokens;
+          thread_data_ptr->data[substitute_index++] = 0x80000000 + match_node_ptr->num_symbols;
           if (substitute_index == 0x400000) {
             thread_data_ptr->num_substitutions += 0x400000;
             substitute_index = 0;
             while (thread_data_ptr->data[0x3FFFFF]);
           }
-          thread_data_ptr->data[substitute_index++] = num_base_tokens + new_token_number[node_score_number];
-          if (in_token_ptr >= end_token_ptr) {
-            thread_data_ptr->extra_match_symbols = in_token_ptr - end_token_ptr;
-            goto thread_token_substitution_loop_end;
+          thread_data_ptr->data[substitute_index++] = num_simple_symbols + new_symbol_number[node_score_number];
+          if (in_symbol_ptr >= end_symbol_ptr) {
+            thread_data_ptr->extra_match_symbols = in_symbol_ptr - end_symbol_ptr;
+            goto thread_symbol_substitution_loop_end;
           }
-          this_token = *in_token_ptr++;
-          if ((int)this_token >= 0)
-            goto thread_token_substitution_loop_no_match_with_symbol;
-          num_tokens_to_copy++;
-          if (in_token_ptr == end_token_ptr)
-            goto thread_token_substitution_loop_end;
-          this_token = *in_token_ptr++;
-          goto thread_token_substitution_loop_no_match_with_symbol;
+          this_symbol = *in_symbol_ptr++;
+          if ((int)this_symbol >= 0)
+            goto thread_symbol_substitution_loop_no_match_with_symbol;
+          num_symbols_to_copy++;
+          if (in_symbol_ptr == end_symbol_ptr)
+            goto thread_symbol_substitution_loop_end;
+          this_symbol = *in_symbol_ptr++;
+          goto thread_symbol_substitution_loop_no_match_with_symbol;
         }
-        if (num_tokens_to_copy >= 100000) {
+        if (num_symbols_to_copy >= 100000) {
           if (substitute_index == 0x400000) {
             thread_data_ptr->num_substitutions += 0x400000;
             substitute_index = 0;
             while (thread_data_ptr->data[0x3FFFFF]);
           }
-          thread_data_ptr->data[substitute_index++] = num_tokens_to_copy;
-          num_tokens_to_copy = 0;
+          thread_data_ptr->data[substitute_index++] = num_symbols_to_copy;
+          num_symbols_to_copy = 0;
         }
-        this_token = *in_token_ptr++;
-        if ((int)this_token >= 0)
-          goto thread_token_substitution_loop_match_with_child;
-        num_tokens_to_copy += match_node_ptr->num_tokens + 1;
-        if (in_token_ptr >= end_token_ptr) {
-          num_tokens_to_copy -= in_token_ptr - end_token_ptr;
-          goto thread_token_substitution_loop_end;
+        this_symbol = *in_symbol_ptr++;
+        if ((int)this_symbol >= 0)
+          goto thread_symbol_substitution_loop_match_with_child;
+        num_symbols_to_copy += match_node_ptr->num_symbols + 1;
+        if (in_symbol_ptr >= end_symbol_ptr) {
+          num_symbols_to_copy -= in_symbol_ptr - end_symbol_ptr;
+          goto thread_symbol_substitution_loop_end;
         }
-        this_token = *in_token_ptr++;
-        goto thread_token_substitution_loop_no_match_with_symbol;
+        this_symbol = *in_symbol_ptr++;
+        goto thread_symbol_substitution_loop_no_match_with_symbol;
       }
-      else { // define token
-        num_tokens_to_copy += match_node_ptr->num_tokens + 1;
-        if (in_token_ptr >= end_token_ptr) {
-          num_tokens_to_copy -= in_token_ptr - end_token_ptr;
-          goto thread_token_substitution_loop_end;
+      else { // define symbol
+        num_symbols_to_copy += match_node_ptr->num_symbols + 1;
+        if (in_symbol_ptr >= end_symbol_ptr) {
+          num_symbols_to_copy -= in_symbol_ptr - end_symbol_ptr;
+          goto thread_symbol_substitution_loop_end;
         }
-        this_token = *in_token_ptr++;
-        goto thread_token_substitution_loop_no_match_with_symbol;
+        this_symbol = *in_symbol_ptr++;
+        goto thread_symbol_substitution_loop_no_match_with_symbol;
       }
     }
-    if (++num_tokens_to_copy <= 100000) {
-      if (in_token_ptr == end_token_ptr)
-        goto thread_token_substitution_loop_end;
-      this_token = *in_token_ptr++;
-      if ((int)this_token >= 0)
-        goto thread_token_substitution_loop_no_match_with_symbol;
-      num_tokens_to_copy++;
-      if (in_token_ptr == end_token_ptr)
-        goto thread_token_substitution_loop_end;
-      this_token = *in_token_ptr++;
-      goto thread_token_substitution_loop_no_match_with_symbol;
+    if (++num_symbols_to_copy <= 100000) {
+      if (in_symbol_ptr == end_symbol_ptr)
+        goto thread_symbol_substitution_loop_end;
+      this_symbol = *in_symbol_ptr++;
+      if ((int)this_symbol >= 0)
+        goto thread_symbol_substitution_loop_no_match_with_symbol;
+      num_symbols_to_copy++;
+      if (in_symbol_ptr == end_symbol_ptr)
+        goto thread_symbol_substitution_loop_end;
+      this_symbol = *in_symbol_ptr++;
+      goto thread_symbol_substitution_loop_no_match_with_symbol;
     }
     if (substitute_index == 0x400000) {
       thread_data_ptr->num_substitutions += 0x400000;
       substitute_index = 0;
       while (thread_data_ptr->data[0x3FFFFF]);
     }
-    thread_data_ptr->data[substitute_index++] = num_tokens_to_copy;
-    num_tokens_to_copy = 0;
-    if (in_token_ptr == end_token_ptr)
-      goto thread_token_substitution_loop_end;
-    this_token = *in_token_ptr++;
-    if ((int)this_token >= 0)
-      goto thread_token_substitution_loop_no_match_with_symbol;
-    num_tokens_to_copy = 1;
-    if (in_token_ptr == end_token_ptr)
-      goto thread_token_substitution_loop_end;
-    this_token = *in_token_ptr++;
-    goto thread_token_substitution_loop_no_match_with_symbol;
+    thread_data_ptr->data[substitute_index++] = num_symbols_to_copy;
+    num_symbols_to_copy = 0;
+    if (in_symbol_ptr == end_symbol_ptr)
+      goto thread_symbol_substitution_loop_end;
+    this_symbol = *in_symbol_ptr++;
+    if ((int)this_symbol >= 0)
+      goto thread_symbol_substitution_loop_no_match_with_symbol;
+    num_symbols_to_copy = 1;
+    if (in_symbol_ptr == end_symbol_ptr)
+      goto thread_symbol_substitution_loop_end;
+    this_symbol = *in_symbol_ptr++;
+    goto thread_symbol_substitution_loop_no_match_with_symbol;
   }
-  else { // define token
-    num_tokens_to_copy++;
-    if (in_token_ptr == end_token_ptr)
-      goto thread_token_substitution_loop_end;
-    this_token = *in_token_ptr++;
-    goto thread_token_substitution_loop_no_match_with_symbol;
+  else { // define symbol
+    num_symbols_to_copy++;
+    if (in_symbol_ptr == end_symbol_ptr)
+      goto thread_symbol_substitution_loop_end;
+    this_symbol = *in_symbol_ptr++;
+    goto thread_symbol_substitution_loop_no_match_with_symbol;
   }
 
-thread_token_substitution_loop_end:
-  if (num_tokens_to_copy) {
+thread_symbol_substitution_loop_end:
+  if (num_symbols_to_copy) {
     if (substitute_index == 0x400000) {
       thread_data_ptr->num_substitutions += 0x400000;
       substitute_index = 0;
       while (thread_data_ptr->data[0x3FFFFF]);
     }
-    thread_data_ptr->data[substitute_index++] = num_tokens_to_copy;
+    thread_data_ptr->data[substitute_index++] = num_symbols_to_copy;
   }
   thread_data_ptr->num_substitutions += substitute_index;
   thread_data_ptr->done = 1;
+  return(0);
 }
 
 
@@ -1458,32 +1440,24 @@ thread_token_substitution_loop_end:
 int main(int argc, char* argv[])
 {
   FILE *fd_in, *fd_out;
-  size_t available_RAM;
-  unsigned int in_size, num_in_tokens, num_start_tokens, num_tokens_defined, arg_num, i2;
-  unsigned int best_score_num_chars, UTF8_value, max_UTF8_value, num_tokens_processed, token, num_tokens_to_copy;
-  unsigned int first_token_number, node_score_number, suffix_node_number, next_string_node_num, string_node_num_limit;
-  unsigned int *search_match_ptr, *match_strings, *match_string_start_ptr, *node_string_start_ptr;
-  unsigned short int scan_cycle, num_tokens_in_string;
-  unsigned char UTF8_compliant, cap_encoded, user_set_RAM_size, this_char, delta_gap;
-  unsigned char *free_RAM_ptr, *write_ptr;
-  unsigned char out_char, out_file_name[50];
-  double d_num_token, prior_min_score, new_min_score, order_0_entropy, d_token_count, this_log_token_count_minus_log_num_tokens;
-  double log_num_tokens, log2_inv, RAM_usage;
-  float prior_cycle_start_ratio, prior_cycle_end_ratio, estimated_nodes_per_token;
-  struct string_node *string_node_ptr;
+  U64 available_RAM, *base_node_ptr;
+  U32 in_size, num_file_symbols, num_start_symbols, num_compound_symbols, arg_num, i2;
+  U32 UTF8_value, max_UTF8_value, symbol, num_symbols_to_copy;
+  U32 first_symbol_number, node_score_number, suffix_node_number, next_string_node_num, string_node_num_limit;
+  U32 *search_match_ptr, *match_strings, *match_string_start_ptr, *node_string_start_ptr, *base_node_child_num_ptr;
+  U16 scan_cycle = 0;
+  U8 UTF8_compliant, cap_encoded, user_set_RAM_size, this_char, delta_gap;
+  U8 *free_RAM_ptr, *write_ptr;
+  double d_file_symbols, prior_min_score, new_min_score, order_0_entropy, log_file_symbols, RAM_usage;
+  float prior_cycle_start_ratio, prior_cycle_end_ratio;
 
   pthread_t build_lcp_thread1, build_lcp_thread2, build_lcp_thread3, build_lcp_thread4, build_lcp_thread5, build_lcp_thread6;
   pthread_t rank_scores_thread1, substitute_thread1;
   pthread_t overlap_check_threads[7];
   pthread_t find_substitutions_threads[7];
 
-  unsigned long long start_time = (unsigned long long)clock();
 
-  log2_inv = 1.0/log(2.0);
-  for (i1 = 0 ; i1 < MAX_STRING_LENGTH ; i1++) {
-    double d_temp = 1.0 / (double)i1;
-    d_num_tokens_in_string_inv_pow5[i1] = d_temp * d_temp * d_temp * d_temp * d_temp;
-  }
+  clock_t start_time = clock();
 
   for (i1 = 0 ; i1 < MAX_SCORES ; i1++)
     node_scores_bad[i1] = 0;
@@ -1491,13 +1465,22 @@ int main(int argc, char* argv[])
   for (i1 = 0 ; i1 < 0x10000 ; i1++)
     substitute_data[i1] = 0;
 
-  cutoff_score = 7.0;
+  production_cost = 6.0;
+  profit_ratio_power = 2.0;
   RAM_usage = 6.5;
   user_set_RAM_size = 0;
   arg_num = 1;
   while (*argv[arg_num] ==  '-') {
-    if (*(argv[arg_num]+1) == 'm')
-      cutoff_score = (double)atof(argv[arg_num++]+2);
+    if (*(argv[arg_num]+1) == 'm') {
+      production_cost = (double)atof(argv[arg_num++]+2);
+    }
+    else if (*(argv[arg_num]+1) == 'p') {
+      profit_ratio_power = (double)atof(argv[arg_num++]+2);
+      if (profit_ratio_power < 0.0) {
+        fprintf(stderr,"ERROR - p value must be >= 0.0\n");
+        exit(0);
+      }
+    }
     else if (*(argv[arg_num]+1) == 'r') {
       user_set_RAM_size = 1;
       RAM_usage = (double)atof(argv[arg_num++]+2);
@@ -1507,7 +1490,7 @@ int main(int argc, char* argv[])
       }
     }
     else {
-      fprintf(stderr,"ERROR - Invalid '-' format.  Only -m<value> and -r<value> allowed\n");
+      fprintf(stderr,"ERROR - Invalid '-' format.  Only -m<value>, -p<value> and -r<value> allowed\n");
       exit(0);
     }
   }
@@ -1522,35 +1505,39 @@ int main(int argc, char* argv[])
   rewind(fd_in);
 
   // Determine whether the RAM can be allocated, if not reduce size until malloc successful or RAM too small
+  U64 max_memory_usage;
+  if (sizeof(U32 *) >= 8)
+    max_memory_usage = 0x800000000;
+  else
+    max_memory_usage = 0x70000000;
   if (user_set_RAM_size) {
-    available_RAM = (size_t)((double)in_size * RAM_usage) + 30000000;
-    if (available_RAM > MAX_MEMORY_USAGE)
-      available_RAM = MAX_MEMORY_USAGE;
+    available_RAM = (U64)((double)in_size * RAM_usage) + 30000000;
+    if (available_RAM > max_memory_usage)
+      available_RAM = max_memory_usage;
   }
   else if (in_size > 260000000)
-    if (13 * (size_t)in_size / 2 < MAX_MEMORY_USAGE)
-      available_RAM = 13 * (size_t)in_size / 2;
+    if (13 * (U64)in_size / 2 < max_memory_usage)
+      available_RAM = 13 * (U64)in_size / 2;
     else
-      available_RAM = MAX_MEMORY_USAGE;
+      available_RAM = max_memory_usage;
   else
     available_RAM = 1690000000;
-    
 
-  start_token_ptr = (unsigned int *)malloc(available_RAM + 100000000 + 4 * in_size);
-  if (start_token_ptr == 0) {
+  start_symbol_ptr = (U32 *)malloc(available_RAM + 100000000 + 4 * in_size);
+  if (start_symbol_ptr == 0) {
     fprintf(stderr,"ERROR - Insufficient RAM to compress - unable to allocate %Iu bytes for nodes\n",
-      available_RAM + 100000000 + 4 * (size_t)in_size);
+        (size_t)(available_RAM + 100000000 + 4 * (U64)in_size));
     exit(0);
   }
-  fprintf(stderr,"Allocated %Iu bytes for data processing\n",available_RAM);
+  fprintf(stderr,"Allocated %Iu bytes for data processing\n",(size_t)available_RAM);
 
-  char_buffer = (unsigned char *)start_token_ptr + 4 * (in_size + 1);
-  in_token_ptr = start_token_ptr;
+  char_buffer = (U8 *)start_symbol_ptr + 4 * (in_size + 1);
+  in_symbol_ptr = start_symbol_ptr;
 
   i1 = fread(char_buffer,1,in_size,fd_in);
   fflush(fd_in);
   fclose(fd_in);
-  fprintf(stderr,"Read %u byte input file\n",i1);
+  fprintf(stderr,"Read %u byte input file\n",(unsigned int)i1);
 
   // parse the file to determine UTF8_compliant
   UTF8_compliant = 1;
@@ -1565,8 +1552,8 @@ int main(int argc, char* argv[])
   }
 
   do {
-    if (*in_char_ptr >= INSERT_TOKEN_CHAR) {
-      if (*(in_char_ptr+1) != DEFINE_TOKEN_CHAR)
+    if (*in_char_ptr >= INSERT_SYMBOL_CHAR) {
+      if (*(in_char_ptr+1) != DEFINE_SYMBOL_CHAR)
         in_char_ptr += 4;
       else {
         UTF8_compliant = 0;
@@ -1614,182 +1601,182 @@ int main(int argc, char* argv[])
   if (in_char_ptr > end_char_ptr)
     UTF8_compliant = 0;
 
-  fprintf(stderr,"cap encoded: %u, UTF8 compliant %u\n",cap_encoded,UTF8_compliant);
+  fprintf(stderr,"cap encoded: %u, UTF8 compliant %u\n",(unsigned int)cap_encoded,(unsigned int)UTF8_compliant);
 
-  // parse the file to determine num_tokens_defined and max_UTF8_value
-  num_in_tokens = 0;
-  num_tokens_defined = 0;
+  // parse the file to determine num_compound_symbols and max_UTF8_value
+  num_file_symbols = 0;
+  num_compound_symbols = 0;
   in_char_ptr = char_buffer + 1;
 
   if (UTF8_compliant) {
-    num_base_tokens = START_MY_TOKENS;
-    first_token_number = 0x80000000 + START_MY_TOKENS;
+    num_simple_symbols = START_MY_SYMBOLS;
+    first_symbol_number = 0x80000000 + START_MY_SYMBOLS;
     max_UTF8_value = 0;
     while (in_char_ptr != end_char_ptr) {
       this_char = *in_char_ptr++;
       if (this_char < 0x80)
-        *in_token_ptr++ = (unsigned int)this_char;
-      else if (this_char == INSERT_TOKEN_CHAR) {
-        *in_token_ptr++ = START_MY_TOKENS + 0x10000 * (unsigned int)*in_char_ptr
-            + 0x100 * (unsigned int)*(in_char_ptr+1) + (unsigned int)*(in_char_ptr+2);
+        *in_symbol_ptr++ = (U32)this_char;
+      else if (this_char == INSERT_SYMBOL_CHAR) {
+        *in_symbol_ptr++ = START_MY_SYMBOLS + 0x10000 * (U32)*in_char_ptr + 0x100 * (U32)*(in_char_ptr+1) + (U32)*(in_char_ptr+2);
         in_char_ptr += 3;
       }
-      else if (this_char == DEFINE_TOKEN_CHAR) {
-        *in_token_ptr++ = first_token_number + 0x10000 * (unsigned int)*in_char_ptr
-            + 0x100 * (unsigned int)*(in_char_ptr+1) + (unsigned int)*(in_char_ptr+2);
+      else if (this_char == DEFINE_SYMBOL_CHAR) {
+        *in_symbol_ptr++ = first_symbol_number + 0x10000 * (U32)*in_char_ptr
+            + 0x100 * (U32)*(in_char_ptr+1) + (U32)*(in_char_ptr+2);
         in_char_ptr += 3;
-        num_tokens_defined++;
+        num_compound_symbols++;
       }
       else if (this_char >= 0x80) {
         if (this_char >= 0xF0) {
-          UTF8_value = 0x40000 * (unsigned int)(this_char & 0x7) + 0x1000 * (unsigned int)(*in_char_ptr++ & 0x3F);
-          UTF8_value += 0x40 * (unsigned int)(*in_char_ptr++ & 0x3F);
-          UTF8_value += (unsigned int)*in_char_ptr++ & 0x3F;
+          UTF8_value = 0x40000 * (U32)(this_char & 0x7) + 0x1000 * (U32)(*in_char_ptr++ & 0x3F);
+          UTF8_value += 0x40 * (U32)(*in_char_ptr++ & 0x3F);
+          UTF8_value += (U32)*in_char_ptr++ & 0x3F;
         }
         else if (this_char >= 0xE0) {
-          UTF8_value = 0x1000 * (unsigned int)(this_char & 0xF) + 0x40 * (unsigned int)(*in_char_ptr++ & 0x3F);
-          UTF8_value += (unsigned int)*in_char_ptr++ & 0x3F;
+          UTF8_value = 0x1000 * (U32)(this_char & 0xF) + 0x40 * (U32)(*in_char_ptr++ & 0x3F);
+          UTF8_value += (U32)*in_char_ptr++ & 0x3F;
         }
         else 
-          UTF8_value = 0x40 * (unsigned int)(this_char & 0x1F) + (*in_char_ptr++ & 0x3F);
+          UTF8_value = 0x40 * (U32)(this_char & 0x1F) + (*in_char_ptr++ & 0x3F);
         if (UTF8_value > max_UTF8_value)
           max_UTF8_value = UTF8_value;
-        *in_token_ptr++ = UTF8_value;
+        *in_symbol_ptr++ = UTF8_value;
       }
-      num_in_tokens++;
+      num_file_symbols++;
     }
-    fprintf(stderr,"Found %u symbols, %u defines, maximum unicode value 0x%x\n",num_in_tokens,num_tokens_defined,max_UTF8_value);
+    fprintf(stderr,"Found %u symbols, %u defines, maximum unicode value 0x%x\n",
+        (unsigned int)num_file_symbols,(unsigned int)num_compound_symbols,(unsigned int)max_UTF8_value);
   }
   else {
-    available_RAM += 4 * (size_t)in_size;
-    num_base_tokens = 0x100;
-    first_token_number = 0x80000000 + 0x100;
+    available_RAM += 4 * (U64)in_size;
+    num_simple_symbols = 0x100;
+    first_symbol_number = 0x80000000 + 0x100;
     while (in_char_ptr != end_char_ptr) {
       this_char = *in_char_ptr++;
-      if (this_char < INSERT_TOKEN_CHAR)
-        *in_token_ptr++ = (unsigned int)this_char;
+      if (this_char < INSERT_SYMBOL_CHAR)
+        *in_symbol_ptr++ = (U32)this_char;
       else {
-        if (*in_char_ptr == DEFINE_TOKEN_CHAR) {
-          *in_token_ptr++ = (unsigned int)this_char;
+        if (*in_char_ptr == DEFINE_SYMBOL_CHAR) {
+          *in_symbol_ptr++ = (U32)this_char;
           in_char_ptr++;
         }
         else {
-          if (this_char == INSERT_TOKEN_CHAR)
-            *in_token_ptr++ = 0x100 + 0x10000 * (unsigned int)*in_char_ptr
-                + 0x100 * (unsigned int)*(in_char_ptr+1) + (unsigned int)*(in_char_ptr+2);
+          if (this_char == INSERT_SYMBOL_CHAR)
+            *in_symbol_ptr++ = 0x100 + 0x10000 * (U32)*in_char_ptr + 0x100 * (U32)*(in_char_ptr+1) + (U32)*(in_char_ptr+2);
           else {
-            *in_token_ptr++ = first_token_number + 0x10000 * (unsigned int)*in_char_ptr
-                + 0x100 * (unsigned int)*(in_char_ptr+1) + (unsigned int)*(in_char_ptr+2);
-            num_tokens_defined++;
+            *in_symbol_ptr++ = first_symbol_number + 0x10000 * (U32)*in_char_ptr
+                + 0x100 * (U32)*(in_char_ptr+1) + (U32)*(in_char_ptr+2);
+            num_compound_symbols++;
           }
           in_char_ptr += 3;
         }
       }
-      num_in_tokens++;
+      num_file_symbols++;
     }
-    fprintf(stderr,"Found %u symbols, %u defines\n",num_in_tokens,num_tokens_defined);
+    fprintf(stderr,"Found %u symbols, %u defines\n",(unsigned int)num_file_symbols,(unsigned int)num_compound_symbols);
   }
-  end_token_ptr = in_token_ptr;
-  *end_token_ptr = 0xFFFFFFFE;
-  free_RAM_ptr = (unsigned char *)(end_token_ptr + 1);
+  end_symbol_ptr = in_symbol_ptr;
+  *end_symbol_ptr = 0xFFFFFFFE;
+  free_RAM_ptr = (U8 *)(end_symbol_ptr + 1);
   available_RAM = (available_RAM / 20) * 19;
 
-  unsigned long long *token_count_ptr;
-  token_count_ptr = (unsigned long long *)token_count;
-  while (token_count_ptr < (unsigned long long *)(token_count + num_start_tokens))
-    *token_count_ptr++ = 0;
+  num_start_symbols = num_simple_symbols + num_compound_symbols;
+  U64 *symbol_count_ptr;
+  symbol_count_ptr = (U64 *)symbol_count;
+  while (symbol_count_ptr < (U64 *)(symbol_count + num_start_symbols))
+    *symbol_count_ptr++ = 0;
 
-  // parse the data to determine token_counts
-  in_token_ptr = start_token_ptr;
+  // parse the data to determine symbol_counts
+  in_symbol_ptr = start_symbol_ptr;
   do {
-    token = *in_token_ptr++;
-    while ((int)token >= 0) {
-      token_count[token]++;
-      token = *in_token_ptr++;
+    symbol = *in_symbol_ptr++;
+    while ((int)symbol >= 0) {
+      symbol_count[symbol]++;
+      symbol = *in_symbol_ptr++;
     }
-  } while (token != 0xFFFFFFFE);
+  } while (symbol != 0xFFFFFFFE);
 
-  log_instances[1] = 0.0;
+  log2_instances[1] = 0.0;
   for (i1=2 ; i1<NUM_PRECALCULATED_INSTANCE_LOGS ; i1++)
-    log_instances[i1] = log2((double)i1);
+    log2_instances[i1] = log2((double)i1);
 
   i1 = 0x10000;
   while (i1--)
     rank_scores_buffer[i1].node_ptrs = 0;
 
-  max_scores = 6000;
-  min_score = cutoff_score;
+  max_scores = 5000;
+  min_score = production_cost;
   prior_min_score = min_score;
   prior_cycle_start_ratio = 0.0;
   prior_cycle_end_ratio = 1.0;
-  scan_cycle = 0;
 
   do {
-    num_start_tokens = num_base_tokens + num_tokens_defined;
-    num_in_tokens = end_token_ptr - start_token_ptr;
-    *end_token_ptr = 0xFFFFFFFE;
+    num_start_symbols = num_simple_symbols + num_compound_symbols;
+    num_file_symbols = end_symbol_ptr - start_symbol_ptr;
+    *end_symbol_ptr = 0xFFFFFFFE;
 
-    // Allocate memory for the log token count arrays
+    // Allocate memory for the log symbol count arrays
     if ((size_t)free_RAM_ptr % sizeof(double) != 0)
-      free_RAM_ptr = (unsigned char *)(((size_t)free_RAM_ptr/sizeof(double) + 1) * sizeof(double));
-    log_token_count_minus_log_num_tokens = (double *)free_RAM_ptr;
-    free_RAM_ptr += sizeof(double) * (size_t)num_start_tokens;
+      free_RAM_ptr = (U8 *)(((size_t)free_RAM_ptr/sizeof(double) + 1) * sizeof(double));
+    symbol_entropy = (double *)free_RAM_ptr;
+    free_RAM_ptr += sizeof(double) * (size_t)num_start_symbols;
 
     // Set the memory addresses for the base_string_nodes_child_ptr array
-    base_string_nodes_child_node_num = (unsigned int *)free_RAM_ptr;
+    base_string_nodes_child_node_num = (U32 *)free_RAM_ptr;
 
     // pre-calculate log match ratios
-    d_num_token = (double)num_in_tokens;
-    d_num_token_inv = 1.0 / d_num_token;
-    for (i1=2 ; i1<NUM_PRECALCULATED_MATCH_RATIO_LOGS ; i1++)
-      log_match_ratios[i1] = log2((double)(i1-1) * d_num_token_inv);  // offset by 1 because the first instance is not a match
+    d_file_symbols = (double)num_file_symbols;
+    log2_num_symbols_plus_substitution_cost = log2(d_file_symbols) + 1.4;
+    for (i1 = 2 ; i1 < NUM_PRECALCULATED_MATCH_RATIO_LOGS ; i1++)
+      // offset by 1 because the first instance is not a repeat
+      new_symbol_cost[i1] = log2_num_symbols_plus_substitution_cost - log2((double)(i1-1));
 
     order_0_entropy = 0.0;
-    log_num_tokens = log2(d_num_token);
+    log_file_symbols = log2(d_file_symbols);
     i1 = 0;
 
     do {
-      if (token_count[i1] != 0) {
-        if (token_count[i1] < NUM_PRECALCULATED_INSTANCE_LOGS) {
-          this_log_token_count_minus_log_num_tokens = log_instances[token_count[i1]] - log_num_tokens;
-          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_tokens;
-          order_0_entropy -= (double)token_count[i1] * this_log_token_count_minus_log_num_tokens;
+      if (symbol_count[i1] != 0) {
+        if (symbol_count[i1] < NUM_PRECALCULATED_INSTANCE_LOGS) {
+          double this_symbol_entropy = log_file_symbols - log2_instances[symbol_count[i1]];
+          symbol_entropy[i1] = this_symbol_entropy;
+          order_0_entropy += (double)symbol_count[i1] * this_symbol_entropy;
         }
         else {
-          d_token_count = (double)token_count[i1];
-          this_log_token_count_minus_log_num_tokens = log2(d_token_count) - log_num_tokens;
-          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_tokens;
-          order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_tokens;
+          double d_symbol_count = (double)symbol_count[i1];
+          double this_symbol_entropy = log_file_symbols - log2(d_symbol_count);
+          symbol_entropy[i1] = this_symbol_entropy;
+          order_0_entropy += d_symbol_count * this_symbol_entropy;
         }
       }
-    } while (++i1 < num_base_tokens);
+    } while (++i1 < num_simple_symbols);
 
-    if (num_tokens_defined != 0) {
-      while (i1 < num_start_tokens) {
-        if (token_count[i1] < NUM_PRECALCULATED_INSTANCE_LOGS) {
-          this_log_token_count_minus_log_num_tokens = log_instances[token_count[i1]] - log_num_tokens;
-          log_token_count_minus_log_num_tokens[i1] = this_log_token_count_minus_log_num_tokens;
-          order_0_entropy -= (double)token_count[i1++] * this_log_token_count_minus_log_num_tokens;
+    if (num_compound_symbols != 0) {
+      while (i1 < num_start_symbols) {
+        if (symbol_count[i1] < NUM_PRECALCULATED_INSTANCE_LOGS) {
+          double this_symbol_entropy = log_file_symbols - log2_instances[symbol_count[i1]];
+          symbol_entropy[i1] = this_symbol_entropy;
+          order_0_entropy += (double)symbol_count[i1++] * this_symbol_entropy;
         }
         else {
-          d_token_count = (double)token_count[i1];
-          this_log_token_count_minus_log_num_tokens = log2(d_token_count) - log_num_tokens;
-          log_token_count_minus_log_num_tokens[i1++] = this_log_token_count_minus_log_num_tokens;
-          order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_tokens;
+          double d_symbol_count = (double)symbol_count[i1];
+          double this_symbol_entropy = log_file_symbols - log2(d_symbol_count);
+          symbol_entropy[i1++] = this_symbol_entropy;
+          order_0_entropy += d_symbol_count * this_symbol_entropy;
         }
       }
-      d_token_count = (double)num_tokens_defined;
-      this_log_token_count_minus_log_num_tokens = log2(d_token_count) - log_num_tokens;
-      order_0_entropy -= d_token_count * this_log_token_count_minus_log_num_tokens;
+      double d_symbol_count = (double)num_compound_symbols;
+      double this_symbol_entropy = log_file_symbols - log2(d_symbol_count);
+      order_0_entropy += d_symbol_count * this_symbol_entropy;
     }
-    order_0_entropy *= d_num_token_inv;
     fprintf(stderr,"%u: %u syms, dict. size %u, %.4f bits/sym, o0e %u bytes\n",
-        ++scan_cycle,num_in_tokens,num_tokens_defined,order_0_entropy,(unsigned int)(d_num_token*order_0_entropy/8.0));
+        (unsigned int)++scan_cycle,(unsigned int)num_file_symbols,(unsigned int)num_compound_symbols,
+        (float)(order_0_entropy/d_file_symbols),(unsigned int)(order_0_entropy*0.125));
 
     // setup to build the suffix tree
-    unsigned long long *base_node_ptr = (unsigned long long *)base_string_nodes_child_node_num;
-    while (base_node_ptr < (unsigned long long *)(base_string_nodes_child_node_num
-        + (num_start_tokens * BASE_NODES_CHILD_ARRAY_SIZE))) {
+    base_node_ptr = (U64 *)base_string_nodes_child_node_num;
+    while (base_node_ptr < (U64 *)(base_string_nodes_child_node_num
+        + (num_start_symbols * BASE_NODES_CHILD_ARRAY_SIZE))) {
       *base_node_ptr = 0;
       *(base_node_ptr + 1) = 0;
       *(base_node_ptr + 2) = 0;
@@ -1808,103 +1795,102 @@ int main(int argc, char* argv[])
       *(base_node_ptr + 15) = 0;
       base_node_ptr += BASE_NODES_CHILD_ARRAY_SIZE;
     }
-    num_tokens_processed = 0;
     num_node_scores = 0;
 
     // Set the memory adddress for the suffix tree nodes
     string_nodes = (struct string_node *)((size_t)free_RAM_ptr
-        + sizeof(unsigned int) * (size_t)num_start_tokens * BASE_NODES_CHILD_ARRAY_SIZE);
-    string_node_num_limit = (unsigned int)(((size_t)start_token_ptr + available_RAM - (size_t)string_nodes)
+        + sizeof(U32) * (size_t)num_start_symbols * BASE_NODES_CHILD_ARRAY_SIZE);
+    string_node_num_limit = (U32)(((U8 *)start_symbol_ptr - (U8 *)string_nodes + available_RAM)
         / sizeof(struct string_node)) - MAX_STRING_LENGTH;
 
     if (1.0 - prior_cycle_end_ratio < prior_cycle_end_ratio - prior_cycle_start_ratio) {
       if ((1.0 - prior_cycle_end_ratio) * 1.5 < prior_cycle_end_ratio - prior_cycle_start_ratio) {
         prior_cycle_start_ratio = 0.0;
-        in_token_ptr = start_token_ptr;
+        in_symbol_ptr = start_symbol_ptr;
       }
       else {
         prior_cycle_start_ratio = 1.0 - 0.95 * (prior_cycle_end_ratio - prior_cycle_start_ratio);
-        in_token_ptr = start_token_ptr + (unsigned int)(prior_cycle_start_ratio * (float)(end_token_ptr - start_token_ptr));
+        in_symbol_ptr = start_symbol_ptr + (U32)(prior_cycle_start_ratio * (float)(end_symbol_ptr - start_symbol_ptr));
       }
     }
     else {
       prior_cycle_start_ratio = prior_cycle_end_ratio;
-      in_token_ptr = start_token_ptr + (unsigned int)(prior_cycle_start_ratio * (float)(end_token_ptr - start_token_ptr));
+      in_symbol_ptr = start_symbol_ptr + (U32)(prior_cycle_start_ratio * (float)(end_symbol_ptr - start_symbol_ptr));
     }
 
     next_string_node_num = 0;
-    fprintf(stderr,"Common prefix scan 0 - %x\r",num_start_tokens-1);
+    fprintf(stderr,"Common prefix scan 0 - %x\r",(unsigned int)(num_start_symbols-1));
 
-    unsigned int sum_symbols, symbols_limit; 
-    unsigned int main_max_token;
-    unsigned int main_string_nodes_limit;
+    U32 sum_symbols, symbols_limit; 
+    U32 main_max_symbol;
+    U32 main_string_nodes_limit;
     i1 = 1;
-    sum_symbols = token_count[0];
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 7;
+    sum_symbols = symbol_count[0];
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 7;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    main_max_token = i1 - 1;
-    lcp_thread_data[0].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 15;
+      sum_symbols += symbol_count[i1++];
+    main_max_symbol = i1 - 1;
+    lcp_thread_data[0].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 15;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[0].max_token = i1 - 1;
-    lcp_thread_data[1].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 23;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[0].max_symbol = i1 - 1;
+    lcp_thread_data[1].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 23;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[1].max_token = i1 - 1;
-    lcp_thread_data[2].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 32;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[1].max_symbol = i1 - 1;
+    lcp_thread_data[2].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 32;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[2].max_token = i1 - 1;
-    lcp_thread_data[3].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 42;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[2].max_symbol = i1 - 1;
+    lcp_thread_data[3].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 42;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[3].max_token = i1 - 1;
-    lcp_thread_data[4].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 53;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[3].max_symbol = i1 - 1;
+    lcp_thread_data[4].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 53;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[4].max_token = i1 - 1;
-    lcp_thread_data[5].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 65;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[4].max_symbol = i1 - 1;
+    lcp_thread_data[5].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 65;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[5].max_token = i1 - 1;
-    lcp_thread_data[6].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 69;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[5].max_symbol = i1 - 1;
+    lcp_thread_data[6].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 69;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[6].max_token = i1 - 1;
-    lcp_thread_data[7].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 76;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[6].max_symbol = i1 - 1;
+    lcp_thread_data[7].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 76;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[7].max_token = i1 - 1;
-    lcp_thread_data[8].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 83;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[7].max_symbol = i1 - 1;
+    lcp_thread_data[8].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 83;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[8].max_token = i1 - 1;
-    lcp_thread_data[9].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 89;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[8].max_symbol = i1 - 1;
+    lcp_thread_data[9].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 89;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[9].max_token = i1 - 1;
-    lcp_thread_data[10].min_token = i1;
-    symbols_limit = ((num_in_tokens - num_tokens_defined) / 100) * 95;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[9].max_symbol = i1 - 1;
+    lcp_thread_data[10].min_symbol = i1;
+    symbols_limit = ((num_file_symbols - num_compound_symbols) / 100) * 95;
     while (sum_symbols < symbols_limit)
-      sum_symbols += token_count[i1++];
-    lcp_thread_data[10].max_token = i1 - 1;
-    lcp_thread_data[11].min_token = i1;
-    lcp_thread_data[11].max_token = num_start_tokens - 1;
+      sum_symbols += symbol_count[i1++];
+    lcp_thread_data[10].max_symbol = i1 - 1;
+    lcp_thread_data[11].min_symbol = i1;
+    lcp_thread_data[11].max_symbol = num_start_symbols - 1;
 
-    min_token_ptr = in_token_ptr;
-    stop_token_ptr = in_token_ptr;
-    max_token_ptr = 0;
+    min_symbol_ptr = in_symbol_ptr;
+    stop_symbol_ptr = in_symbol_ptr;
+    max_symbol_ptr = 0;
 
     lcp_thread_data[6].first_string_node_num = 0;
     main_string_nodes_limit = (string_node_num_limit / 100) * 8 - MAX_STRING_LENGTH;
@@ -1940,29 +1926,29 @@ int main(int argc, char* argv[])
     pthread_create(&build_lcp_thread6,NULL,build_lcp_thread,(char *)&lcp_thread_data[5]);
 
     while (next_string_node_num < main_string_nodes_limit) {
-      this_token = *in_token_ptr++;
-      while ((int)this_token >= 0) {
-        if (this_token <= main_max_token) {
-          add_suffix(this_token,in_token_ptr,&next_string_node_num);
-          stop_token_ptr = in_token_ptr;
+      this_symbol = *in_symbol_ptr++;
+      while ((int)this_symbol >= 0) {
+        if (this_symbol <= main_max_symbol) {
+          add_suffix(this_symbol,in_symbol_ptr,&next_string_node_num);
+          stop_symbol_ptr = in_symbol_ptr;
           if (next_string_node_num < main_string_nodes_limit)
-            this_token = *in_token_ptr++;
+            this_symbol = *in_symbol_ptr++;
           else
             goto done_building_lcp_tree;
         }
         else
-          this_token = *in_token_ptr++;
+          this_symbol = *in_symbol_ptr++;
       }
-      if (this_token == 0xFFFFFFFE) {
-        in_token_ptr--;
+      if (this_symbol == 0xFFFFFFFE) {
+        in_symbol_ptr--;
         break; // exit loop on EOF
       }
     }
 done_building_lcp_tree:
-    stop_token_ptr = in_token_ptr;
-    max_token_ptr = in_token_ptr;
+    stop_symbol_ptr = in_symbol_ptr;
+    max_symbol_ptr = in_symbol_ptr;
 
-    unsigned int * base_node_child_num_ptr = base_string_nodes_child_node_num;
+    base_node_child_num_ptr = base_string_nodes_child_node_num;
     node_ptrs_num = 0;
     if (UTF8_compliant)
       pthread_create(&rank_scores_thread1,NULL,rank_scores_thread_UTF8_compliant,(void *)&rank_scores_buffer[0]);
@@ -1970,90 +1956,91 @@ done_building_lcp_tree:
       pthread_create(&rank_scores_thread1,NULL,rank_scores_thread,(void *)&rank_scores_buffer[0]);
 
     i1 = 0;
-    score_nodes(main_max_token);
-    while (rank_scores_buffer[node_ptrs_num - 1].node_ptrs != 0);
+    score_nodes(main_max_symbol);
+    while (rank_scores_buffer[(U16)(node_ptrs_num - 1)].node_ptrs != 0);
 
     pthread_join(build_lcp_thread1,NULL);
     pthread_create(&build_lcp_thread1,NULL,build_lcp_thread,(char *)&lcp_thread_data[6]);
-    score_nodes(lcp_thread_data[0].max_token);
-    while (rank_scores_buffer[node_ptrs_num - 1].node_ptrs != 0);
+    score_nodes(lcp_thread_data[0].max_symbol);
+    while (rank_scores_buffer[(U16)(node_ptrs_num - 1)].node_ptrs != 0);
 
     pthread_join(build_lcp_thread2,NULL);
     pthread_create(&build_lcp_thread2,NULL,build_lcp_thread,(char *)&lcp_thread_data[7]);
-    score_nodes(lcp_thread_data[1].max_token);
-    while (rank_scores_buffer[node_ptrs_num - 1].node_ptrs != 0);
+    score_nodes(lcp_thread_data[1].max_symbol);
+    while (rank_scores_buffer[(U16)(node_ptrs_num - 1)].node_ptrs != 0);
 
     pthread_join(build_lcp_thread3,NULL);
     pthread_create(&build_lcp_thread3,NULL,build_lcp_thread,(char *)&lcp_thread_data[8]);
-    score_nodes(lcp_thread_data[2].max_token);
-    while (rank_scores_buffer[node_ptrs_num - 1].node_ptrs != 0);
+    score_nodes(lcp_thread_data[2].max_symbol);
+    while (rank_scores_buffer[(U16)(node_ptrs_num - 1)].node_ptrs != 0);
 
     pthread_join(build_lcp_thread4,NULL);
     pthread_create(&build_lcp_thread4,NULL,build_lcp_thread,(char *)&lcp_thread_data[9]);
-    score_nodes(lcp_thread_data[3].max_token);
-    while (rank_scores_buffer[node_ptrs_num - 1].node_ptrs != 0);
+    score_nodes(lcp_thread_data[3].max_symbol);
+    while (rank_scores_buffer[(U16)(node_ptrs_num - 1)].node_ptrs != 0);
 
     pthread_join(build_lcp_thread5,NULL);
     pthread_create(&build_lcp_thread5,NULL,build_lcp_thread,(char *)&lcp_thread_data[10]);
-    score_nodes(lcp_thread_data[4].max_token);
-    while (rank_scores_buffer[node_ptrs_num - 1].node_ptrs != 0);
+    score_nodes(lcp_thread_data[4].max_symbol);
+    while (rank_scores_buffer[(U16)(node_ptrs_num - 1)].node_ptrs != 0);
 
     pthread_join(build_lcp_thread6,NULL);
     pthread_create(&build_lcp_thread6,NULL,build_lcp_thread,(char *)&lcp_thread_data[11]);
-    score_nodes(lcp_thread_data[5].max_token);
+    score_nodes(lcp_thread_data[5].max_symbol);
 
     pthread_join(build_lcp_thread1,NULL);
-    score_nodes(lcp_thread_data[6].max_token);
+    score_nodes(lcp_thread_data[6].max_symbol);
 
     pthread_join(build_lcp_thread2,NULL);
-    score_nodes(lcp_thread_data[7].max_token);
+    score_nodes(lcp_thread_data[7].max_symbol);
 
     pthread_join(build_lcp_thread3,NULL);
-    score_nodes(lcp_thread_data[8].max_token);
+    score_nodes(lcp_thread_data[8].max_symbol);
 
     pthread_join(build_lcp_thread4,NULL);
-    score_nodes(lcp_thread_data[9].max_token);
+    score_nodes(lcp_thread_data[9].max_symbol);
 
     pthread_join(build_lcp_thread5,NULL);
-    score_nodes(lcp_thread_data[10].max_token);
+    score_nodes(lcp_thread_data[10].max_symbol);
 
     pthread_join(build_lcp_thread6,NULL);
-    score_nodes(lcp_thread_data[11].max_token);
-    while (rank_scores_buffer[node_ptrs_num - 1].node_ptrs != 0);
+    score_nodes(lcp_thread_data[11].max_symbol);
+    while (rank_scores_buffer[(U16)(node_ptrs_num - 1)].node_ptrs != 0);
 
     rank_scores_buffer[node_ptrs_num].node_ptrs = 1;
     pthread_join(rank_scores_thread1,NULL);
 
     fprintf(stderr,"Read %u of %u symbols, start %.4f\n",
-        in_token_ptr-start_token_ptr-(unsigned int)(prior_cycle_start_ratio*(float)(end_token_ptr-start_token_ptr)),
-        end_token_ptr-start_token_ptr,prior_cycle_start_ratio);
-    prior_cycle_end_ratio = (float)(in_token_ptr-start_token_ptr)/(end_token_ptr-start_token_ptr);
+        (unsigned int)(in_symbol_ptr-start_symbol_ptr-(U32)(prior_cycle_start_ratio*(float)(end_symbol_ptr-start_symbol_ptr))),
+        (unsigned int)(end_symbol_ptr-start_symbol_ptr),prior_cycle_start_ratio);
+    prior_cycle_end_ratio = (float)(in_symbol_ptr-start_symbol_ptr)/(end_symbol_ptr-start_symbol_ptr);
 
     if (num_node_scores) {
-      fprintf(stderr,"Common prefix scan 0 - %x, score[%hu] = %.2f\n",
-          num_start_tokens-1,num_node_scores,node_scores[node_scores_index[num_node_scores-1]].score);
+      fprintf(stderr,"Common prefix scan 0 - %x, score[%hu] = %.3f\n",
+          (unsigned int)(num_start_symbols-1),(unsigned short int)num_node_scores,
+          node_scores[node_scores_index[num_node_scores-1]].score);
 
-      free_RAM_ptr = (unsigned char *)(end_token_ptr + 1);
+      free_RAM_ptr = (U8 *)(end_symbol_ptr + 1);
       match_nodes = (struct match_node *)free_RAM_ptr;
-      match_nodes[0].num_tokens = 0;
+      match_nodes[0].num_symbols = 0;
       match_nodes[0].child_ptr = 0;
 
       // build a prefix tree of the match strings
       num_match_nodes = 1;
       i1 = 0;
       while (i1 < num_node_scores) {
-        unsigned int *best_score_match_ptr;
+        U32 *best_score_match_ptr;
         best_score_match_ptr = init_best_score_ptrs();
         match_node_ptr = match_nodes;
         while (best_score_match_ptr <= best_score_last_match_ptr) {
-          this_token = *best_score_match_ptr;
+          this_symbol = *best_score_match_ptr;
           if (match_node_ptr->child_ptr == 0) {
             make_and_move_to_match_child();
           }
           else {
-            unsigned char sibling_number;
+            U8 sibling_number;
             move_to_match_child(match_node_ptr,sibling_number);
-            if (this_token == match_node_ptr->token) {
+            if (this_symbol == match_node_ptr->symbol) {
               if (match_node_ptr->child_ptr == 0) {
                 node_scores_bad[i1] = 1;
                 break;
@@ -2072,16 +2059,15 @@ done_building_lcp_tree:
       // span nodes entering the longest suffix matches and invalidating lower score if substring match found
       i1 = 0;
       while (i1 < num_node_scores) {
-        unsigned int *best_score_match_ptr;
+        U32 *best_score_match_ptr;
         best_score_match_ptr = init_best_score_ptrs();
-        // read the first token
-        this_token = *best_score_match_ptr++;
+        // read the first symbol
+        this_symbol = *best_score_match_ptr++;
         match_node_ptr = &match_nodes[1];
         move_to_existing_match_sibling();
         while (best_score_match_ptr <= best_score_last_match_ptr) {
-          // starting with the second token, look for suffixes that are in the prefix tree
+          // starting with the second symbol, look for suffixes that are in the prefix tree
           search_match_ptr = best_score_match_ptr;
-          num_tokens_in_string = 0;
           search_node_ptr = match_nodes;
           while (1) { // follow the tree until find child = 0 or sibling = 0
             if (search_node_ptr->child_ptr == 0) { // found a scored string that is a substring of this string
@@ -2094,37 +2080,37 @@ done_building_lcp_tree:
             search_node_ptr = search_node_ptr->child_ptr;
             if (search_node_ptr == 0) // no children so exit suffix search
               break;
-            this_token = *search_match_ptr;
+            this_symbol = *search_match_ptr;
             move_to_search_sibling();
-            if (this_token != search_node_ptr->token) // no child match so exit suffix search
+            if (this_symbol != search_node_ptr->symbol) // no child match so exit suffix search
               break;
             match_node_ptr->miss_ptr = search_node_ptr;
             search_match_ptr++;
           }
-          this_token = *best_score_match_ptr++;
+          this_symbol = *best_score_match_ptr++;
         }
         i1++;
       }
 
-      // Redo the tree build and miss values with just the valid score tokens
-      match_node_ptr = match_nodes + num_start_tokens;
+      // Redo the tree build and miss values with just the valid score symbols
+      match_node_ptr = match_nodes + num_start_symbols;
       while (match_node_ptr-- != match_nodes)
-        match_node_ptr->num_tokens = 0;
-      num_match_nodes = num_start_tokens;
+        match_node_ptr->num_symbols = 0;
+      num_match_nodes = num_start_symbols;
 
       i1 = 0;
       while (i1 < num_node_scores) {
         if (node_scores_bad[i1] == 0) {
-          unsigned int *best_score_match_ptr;
+          U32 *best_score_match_ptr;
           best_score_match_ptr = init_best_score_ptrs();
-          this_token = *best_score_match_ptr++;
-          match_node_ptr = &match_nodes[this_token];
-          best_score_num_tokens = 1;
-          if (match_node_ptr->num_tokens == 0)
-            init_level_1_match_node(this_token,i1);
+          this_symbol = *best_score_match_ptr++;
+          match_node_ptr = &match_nodes[this_symbol];
+          best_score_num_symbols = 1;
+          if (match_node_ptr->num_symbols == 0)
+            init_level_1_match_node(this_symbol,i1);
           while (best_score_match_ptr <= best_score_last_match_ptr) {
-            this_token = *best_score_match_ptr++;
-            best_score_num_tokens++;
+            this_symbol = *best_score_match_ptr++;
+            best_score_num_symbols++;
             move_to_match_child_with_make();
           }
         }
@@ -2135,26 +2121,26 @@ done_building_lcp_tree:
       i1 = 0;
       while (i1 < num_node_scores) {
         if (node_scores_bad[i1] == 0) {
-          unsigned int *best_score_suffix_ptr;
+          U32 *best_score_suffix_ptr;
           best_score_suffix_ptr = init_best_score_ptrs();
           suffix_node_number = *best_score_suffix_ptr++;
-          // starting at the node of the 2nd token in string, match strings with prefix tree until no match found,
-          //   for each match node found, if suffix miss token is zero, set it to the tree token node
+          // starting at the node of the 2nd symbol in string, match strings with prefix tree until no match found,
+          //   for each match node found, if suffix miss symbol is zero, set it to the tree symbol node
           while (best_score_suffix_ptr <= best_score_last_match_ptr) {
             // follow the suffix until the end (or break on no tree matches)
-            this_token = *best_score_suffix_ptr++;
+            this_symbol = *best_score_suffix_ptr++;
             suffix_node_number = match_nodes[suffix_node_number].child_ptr - match_nodes;
-            unsigned int shifted_token = this_token;
-            while (this_token != match_nodes[suffix_node_number].token) {
-              suffix_node_number = match_nodes[suffix_node_number].sibling_node_num[shifted_token & 0xF];
-              shifted_token = shifted_token >> 4;
+            U32 shifted_symbol = this_symbol;
+            while (this_symbol != match_nodes[suffix_node_number].symbol) {
+              suffix_node_number = match_nodes[suffix_node_number].sibling_node_num[shifted_symbol & 0xF];
+              shifted_symbol = shifted_symbol >> 4;
             }
             match_node_ptr = &match_nodes[suffix_node_number];
-            unsigned int *best_score_match_ptr;
+            U32 *best_score_match_ptr;
             best_score_match_ptr = best_score_suffix_ptr;
 
-            if (match_nodes[this_token].num_tokens != 0) {
-              search_node_ptr = &match_nodes[this_token];
+            if (match_nodes[this_symbol].num_symbols != 0) {
+              search_node_ptr = &match_nodes[this_symbol];
               if (match_node_ptr->child_ptr == 0) {
                 if (match_node_ptr->hit_ptr == 0)
                   match_node_ptr->hit_ptr = search_node_ptr;
@@ -2166,10 +2152,10 @@ done_building_lcp_tree:
                 // follow the tree until end of match string or find child = 0 or sibling = 0
                 if (search_node_ptr->child_ptr == 0) // no child, so done with this suffix
                   break;
-                this_token = *best_score_match_ptr++;
+                this_symbol = *best_score_match_ptr++;
                 move_to_existing_match_child();
                 move_to_search_child();
-                if (this_token != search_node_ptr->token) // no matching sibling, so done with this suffix
+                if (this_symbol != search_node_ptr->symbol) // no matching sibling, so done with this suffix
                   break;
                 if (match_node_ptr->child_ptr == 0) {
                   if (match_node_ptr->hit_ptr == 0)
@@ -2187,39 +2173,39 @@ done_building_lcp_tree:
       // scan the data, following prefix tree
       fprintf(stderr,"Overlap search\r");
 
-      unsigned int prior_match_score_number[MAX_PRIOR_MATCHES];
-      unsigned int *prior_match_end_ptr[MAX_PRIOR_MATCHES]; 
-      unsigned int num_prior_matches = 0;
-      in_token_ptr = start_token_ptr;
-      size_t block_size = (end_token_ptr - start_token_ptr) / 8;
-      unsigned int * block_ptr = start_token_ptr + block_size;
-      stop_token_ptr = block_ptr + MAX_STRING_LENGTH;
+      U32 prior_match_score_number[MAX_PRIOR_MATCHES];
+      U32 *prior_match_end_ptr[MAX_PRIOR_MATCHES]; 
+      U32 num_prior_matches = 0;
+      in_symbol_ptr = start_symbol_ptr;
+      size_t block_size = (end_symbol_ptr - start_symbol_ptr) / 8;
+      U32 * block_ptr = start_symbol_ptr + block_size;
+      stop_symbol_ptr = block_ptr + MAX_STRING_LENGTH;
 
-      if (stop_token_ptr > end_token_ptr)
-        stop_token_ptr = end_token_ptr;
-      overlap_check_data[0].start_token_ptr = block_ptr;
+      if (stop_symbol_ptr > end_symbol_ptr)
+        stop_symbol_ptr = end_symbol_ptr;
+      overlap_check_data[0].start_symbol_ptr = block_ptr;
       block_ptr += block_size;
-      overlap_check_data[0].stop_token_ptr = block_ptr + MAX_STRING_LENGTH;
-      overlap_check_data[1].start_token_ptr = block_ptr;
+      overlap_check_data[0].stop_symbol_ptr = block_ptr + MAX_STRING_LENGTH;
+      overlap_check_data[1].start_symbol_ptr = block_ptr;
       block_ptr += block_size;
-      overlap_check_data[1].stop_token_ptr = block_ptr + MAX_STRING_LENGTH;
-      overlap_check_data[2].start_token_ptr = block_ptr;
+      overlap_check_data[1].stop_symbol_ptr = block_ptr + MAX_STRING_LENGTH;
+      overlap_check_data[2].start_symbol_ptr = block_ptr;
       block_ptr += block_size;
-      overlap_check_data[2].stop_token_ptr = block_ptr + MAX_STRING_LENGTH;
-      overlap_check_data[3].start_token_ptr = block_ptr;
+      overlap_check_data[2].stop_symbol_ptr = block_ptr + MAX_STRING_LENGTH;
+      overlap_check_data[3].start_symbol_ptr = block_ptr;
       block_ptr += block_size;
-      overlap_check_data[3].stop_token_ptr = block_ptr + MAX_STRING_LENGTH;
-      overlap_check_data[4].start_token_ptr = block_ptr;
+      overlap_check_data[3].stop_symbol_ptr = block_ptr + MAX_STRING_LENGTH;
+      overlap_check_data[4].start_symbol_ptr = block_ptr;
       block_ptr += block_size;
-      overlap_check_data[4].stop_token_ptr = block_ptr + MAX_STRING_LENGTH;
-      overlap_check_data[5].start_token_ptr = block_ptr;
+      overlap_check_data[4].stop_symbol_ptr = block_ptr + MAX_STRING_LENGTH;
+      overlap_check_data[5].start_symbol_ptr = block_ptr;
       block_ptr += block_size;
-      overlap_check_data[5].stop_token_ptr = block_ptr + MAX_STRING_LENGTH;
-      overlap_check_data[6].start_token_ptr = block_ptr;
-      overlap_check_data[6].stop_token_ptr = end_token_ptr;
+      overlap_check_data[5].stop_symbol_ptr = block_ptr + MAX_STRING_LENGTH;
+      overlap_check_data[6].start_symbol_ptr = block_ptr;
+      overlap_check_data[6].stop_symbol_ptr = end_symbol_ptr;
       i1 = 5;
-      while (overlap_check_data[i1].stop_token_ptr > end_token_ptr) {
-        overlap_check_data[i1].stop_token_ptr = end_token_ptr;
+      while (overlap_check_data[i1].stop_symbol_ptr > end_symbol_ptr) {
+        overlap_check_data[i1].stop_symbol_ptr = end_symbol_ptr;
         if (i1-- == 0)
           break;
       }
@@ -2227,54 +2213,57 @@ done_building_lcp_tree:
       for (i1 = 0 ; i1 < 7 ; i1++)
         pthread_create(&overlap_check_threads[i1],NULL,overlap_check_thread,(char *)&overlap_check_data[i1]);
 
+      U8 found_same_score_prior_match;
+      U32 prior_match_number;
+
 main_overlap_check_loop_no_match:
-      if (in_token_ptr == stop_token_ptr)
+      if (in_symbol_ptr == stop_symbol_ptr)
         goto main_overlap_check_loop_end;
-      this_token = *in_token_ptr++;
-      if ((int)this_token < 0)
+      this_symbol = *in_symbol_ptr++;
+      if ((int)this_symbol < 0)
         goto main_overlap_check_loop_no_match;
-      if (match_nodes[this_token].num_tokens == 0)
+      if (match_nodes[this_symbol].num_symbols == 0)
         goto main_overlap_check_loop_no_match;
-      match_node_ptr = &match_nodes[this_token];
+      match_node_ptr = &match_nodes[this_symbol];
 
 main_overlap_check_loop_match:
-      if (in_token_ptr == stop_token_ptr)
+      if (in_symbol_ptr == stop_symbol_ptr)
         goto main_overlap_check_loop_end;
-      this_token = *in_token_ptr++;
-      if ((int)this_token < 0)
+      this_symbol = *in_symbol_ptr++;
+      if ((int)this_symbol < 0)
         goto main_overlap_check_loop_no_match;
 
       match_node_ptr = match_node_ptr->child_ptr;
-      if (this_token != match_node_ptr->token) {
-        unsigned int shifted_token = this_token;
+      if (this_symbol != match_node_ptr->symbol) {
+        U32 shifted_symbol = this_symbol;
         do {
-          if (match_node_ptr->sibling_node_num[shifted_token & 0xF] != 0) {
-            match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_token & 0xF]];
-            shifted_token = shifted_token >> 4;
+          if (match_node_ptr->sibling_node_num[shifted_symbol & 0xF] != 0) {
+            match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[shifted_symbol & 0xF]];
+            shifted_symbol = shifted_symbol >> 4;
           }
           else {
             if (match_node_ptr->miss_ptr == 0) {
-              if (match_nodes[this_token].num_tokens == 0)
+              if (match_nodes[this_symbol].num_symbols == 0)
                 goto main_overlap_check_loop_no_match;
-              match_node_ptr = &match_nodes[this_token];
+              match_node_ptr = &match_nodes[this_symbol];
               goto main_overlap_check_loop_match;
             }
             else {
               match_node_ptr = match_node_ptr->miss_ptr;
-              shifted_token = this_token;
+              shifted_symbol = this_symbol;
             }
           }
-        } while (this_token != match_node_ptr->token);
+        } while (this_symbol != match_node_ptr->symbol);
       }
       if (match_node_ptr->child_ptr)
         goto main_overlap_check_loop_match;
 
       // no child, so found a match - check for overlaps
-      unsigned char found_same_score_prior_match = 0;
+      found_same_score_prior_match = 0;
+      prior_match_number = 0;
       node_score_number = match_node_ptr->score_number;
-      unsigned int prior_match_number = 0;
       while (prior_match_number < num_prior_matches) {
-        if (in_token_ptr - node_scores[node_scores_index[node_score_number]].num_tokens
+        if (in_symbol_ptr - node_scores[node_scores_index[node_score_number]].num_symbols
             > prior_match_end_ptr[prior_match_number]) {
           num_prior_matches--;
           for (i2 = prior_match_number ; i2 < num_prior_matches ; i2++) {
@@ -2282,7 +2271,7 @@ main_overlap_check_loop_match:
             prior_match_score_number[i2] = prior_match_score_number[i2+1];
           }
         }
-        else { // overlapping token substitution strings, so invalidate the lower score
+        else { // overlapping symbol substitution strings, so invalidate the lower score
           if (prior_match_score_number[prior_match_number] > node_score_number)
             node_scores_bad[prior_match_score_number[prior_match_number]] = 1;
           else if (prior_match_score_number[prior_match_number] != node_score_number)
@@ -2294,7 +2283,7 @@ main_overlap_check_loop_match:
       }
       match_node_ptr = match_node_ptr->hit_ptr;
       if (found_same_score_prior_match == 0) {
-        prior_match_end_ptr[num_prior_matches] = in_token_ptr - 1;
+        prior_match_end_ptr[num_prior_matches] = in_symbol_ptr - 1;
         prior_match_score_number[num_prior_matches++] = node_score_number;
       }
       if (match_node_ptr == 0)
@@ -2306,64 +2295,64 @@ main_overlap_check_loop_end:
       for (i1 = 0 ; i1 < 7 ; i1++)
         pthread_join(overlap_check_threads[i1],NULL);
 
-      // Redo the tree build and miss values with the final valid score tokens
-      match_node_ptr = match_nodes + num_start_tokens;
+      // Redo the tree build and miss values with the final valid score symbols
+      match_node_ptr = match_nodes + num_start_symbols;
       while (match_node_ptr-- != match_nodes)
-        match_node_ptr->num_tokens = 0;
+        match_node_ptr->num_symbols = 0;
 
-      num_match_nodes = num_start_tokens;
+      num_match_nodes = num_start_symbols;
       max_string_length = 0;
-      i2 = num_tokens_defined;
+      i2 = num_compound_symbols;
       i1 = 0;
       while (i1 < num_node_scores) {
         if (node_scores_bad[i1] == 0) {
-          unsigned int *best_score_match_ptr;
+          U32 *best_score_match_ptr;
           best_score_match_ptr = init_best_score_ptrs();
-          this_token = *best_score_match_ptr++;
-          best_score_num_tokens = 1;
-          match_node_ptr = &match_nodes[this_token];
-          if (match_node_ptr->num_tokens == 0)
-            init_level_1_match_node(this_token,i1);
+          this_symbol = *best_score_match_ptr++;
+          best_score_num_symbols = 1;
+          match_node_ptr = &match_nodes[this_symbol];
+          if (match_node_ptr->num_symbols == 0)
+            init_level_1_match_node(this_symbol,i1);
           while (best_score_match_ptr <= best_score_last_match_ptr) {
-            this_token = *best_score_match_ptr++;
-            best_score_num_tokens++;
+            this_symbol = *best_score_match_ptr++;
+            best_score_num_symbols++;
             move_to_match_child_with_make();
           }
-          if (best_score_num_tokens > max_string_length)
-            max_string_length = best_score_num_tokens;
-          token_count[num_base_tokens+i2] = 0;
-          new_token_number[i1] = i2++;
+          if (best_score_num_symbols > max_string_length)
+            max_string_length = best_score_num_symbols;
+          symbol_count[num_simple_symbols+i2] = 0;
+          new_symbol_number[i1] = i2++;
         }
         i1++;
       }
       max_string_length += 3;
 
-      match_strings = (unsigned int *)((size_t)free_RAM_ptr + (size_t)num_match_nodes * sizeof(struct match_node));
+      match_strings = (U32 *)((size_t)free_RAM_ptr + (size_t)num_match_nodes * sizeof(struct match_node));
 
       // span nodes entering the longest (first) suffix match for each node
       i1 = 0;
       while (i1 < num_node_scores) {
         if (node_scores_bad[i1] == 0) {
-          unsigned int *best_score_suffix_ptr;
+          U32 *best_score_suffix_ptr;
           best_score_suffix_ptr = init_best_score_ptrs();
           suffix_node_number = *best_score_suffix_ptr++;
-          // starting at the node of the 2nd token in string, match strings with prefix tree until no match found,
-          //   for each match node found, if suffix miss token is zero, set it to the tree token node
+          // starting at the node of the 2nd symbol in string, match strings with prefix tree until no match found,
+          //   for each match node found, if suffix miss symbol is zero, set it to the tree symbol node
           while (best_score_suffix_ptr <= best_score_last_match_ptr) {
             // follow the suffix until the end (or break on no tree matches)
-            this_token = *best_score_suffix_ptr++;
+            this_symbol = *best_score_suffix_ptr++;
             suffix_node_number = match_nodes[suffix_node_number].child_ptr - match_nodes;
-            unsigned int shifted_token = this_token;
-            while (this_token != match_nodes[suffix_node_number].token) {
-              suffix_node_number = match_nodes[suffix_node_number].sibling_node_num[shifted_token & 0xF];
-              shifted_token = shifted_token >> 4;
+            U32 shifted_symbol = this_symbol;
+            while (this_symbol != match_nodes[suffix_node_number].symbol) {
+              suffix_node_number = match_nodes[suffix_node_number].sibling_node_num[shifted_symbol & 0xF];
+              shifted_symbol = shifted_symbol >> 4;
             }
             match_node_ptr = &match_nodes[suffix_node_number];
-            unsigned int *best_score_match_ptr;
+            U32 *best_score_match_ptr;
             best_score_match_ptr = best_score_suffix_ptr;
 
-            if (match_nodes[this_token].num_tokens != 0) {
-              search_node_ptr = &match_nodes[this_token];
+            if (match_nodes[this_symbol].num_symbols != 0) {
+              search_node_ptr = &match_nodes[this_symbol];
               if (match_node_ptr->child_ptr == 0) {
                 if (match_node_ptr->hit_ptr == 0)
                   match_node_ptr->hit_ptr = search_node_ptr;
@@ -2375,10 +2364,10 @@ main_overlap_check_loop_end:
                 // follow the tree until end of match string or find child = 0 or sibling = 0
                 if (search_node_ptr->child_ptr == 0) // no child, so done with this suffix
                   break;
-                this_token = *best_score_match_ptr++;
+                this_symbol = *best_score_match_ptr++;
                 move_to_existing_match_child();
                 move_to_search_child();
-                if (this_token != search_node_ptr->token) // no matching sibling, so done with this suffix
+                if (this_symbol != search_node_ptr->symbol) // no matching sibling, so done with this suffix
                   break;
                 if (match_node_ptr->child_ptr == 0) {
                   if (match_node_ptr->hit_ptr == 0)
@@ -2390,52 +2379,52 @@ main_overlap_check_loop_end:
             }
           }
         }
-        // save the match strings so they can be added to the end of the data after token substitution is done
-        match_string_start_ptr = &match_strings[(unsigned int)i1 * max_string_length];
-        node_string_start_ptr = start_token_ptr + node_scores[node_scores_index[i1]].last_match_index1
-          - node_scores[node_scores_index[i1]].num_tokens + 1;
-        for (i2 = 0 ; i2 < node_scores[node_scores_index[i1]].num_tokens ; i2++)
+        // save the match strings so they can be added to the end of the data after symbol substitution is done
+        match_string_start_ptr = &match_strings[(U32)i1 * max_string_length];
+        node_string_start_ptr = start_symbol_ptr + node_scores[node_scores_index[i1]].last_match_index1
+          - node_scores[node_scores_index[i1]].num_symbols + 1;
+        for (i2 = 0 ; i2 < node_scores[node_scores_index[i1]].num_symbols ; i2++)
           *(match_string_start_ptr + i2) = *(node_string_start_ptr + i2);
         i1++;
       }
 
       fprintf(stderr,"Replacing data with new dictionary symbols\r");
-      // scan the data following the prefix tree and substitute new tokens on end matches (child is 0)
-      if (end_token_ptr - start_token_ptr >= 1000000) {
-        stop_token_ptr = start_token_ptr + ((end_token_ptr - start_token_ptr) >> 3);
-        find_substitutions_data[0].start_token_ptr = stop_token_ptr;
-        block_size = (end_token_ptr - start_token_ptr) / 7;
-        block_ptr = stop_token_ptr + block_size;
-        find_substitutions_data[0].stop_token_ptr = block_ptr;
-        find_substitutions_data[1].start_token_ptr = block_ptr;
+      // scan the data following the prefix tree and substitute new symbols on end matches (child is 0)
+      if (end_symbol_ptr - start_symbol_ptr >= 1000000) {
+        stop_symbol_ptr = start_symbol_ptr + ((end_symbol_ptr - start_symbol_ptr) >> 3);
+        find_substitutions_data[0].start_symbol_ptr = stop_symbol_ptr;
+        block_size = (end_symbol_ptr - start_symbol_ptr) / 7;
+        block_ptr = stop_symbol_ptr + block_size;
+        find_substitutions_data[0].stop_symbol_ptr = block_ptr;
+        find_substitutions_data[1].start_symbol_ptr = block_ptr;
         block_ptr += block_size;
-        find_substitutions_data[1].stop_token_ptr = block_ptr;
-        find_substitutions_data[2].start_token_ptr = block_ptr;
+        find_substitutions_data[1].stop_symbol_ptr = block_ptr;
+        find_substitutions_data[2].start_symbol_ptr = block_ptr;
         block_ptr += block_size;
-        find_substitutions_data[2].stop_token_ptr = block_ptr;
-        find_substitutions_data[3].start_token_ptr = block_ptr;
+        find_substitutions_data[2].stop_symbol_ptr = block_ptr;
+        find_substitutions_data[3].start_symbol_ptr = block_ptr;
         block_ptr += block_size;
-        find_substitutions_data[3].stop_token_ptr = block_ptr;
-        find_substitutions_data[4].start_token_ptr = block_ptr;
+        find_substitutions_data[3].stop_symbol_ptr = block_ptr;
+        find_substitutions_data[4].start_symbol_ptr = block_ptr;
         block_ptr += block_size;
-        find_substitutions_data[4].stop_token_ptr = block_ptr;
-        find_substitutions_data[5].start_token_ptr = block_ptr;
-        find_substitutions_data[5].stop_token_ptr = end_token_ptr;
+        find_substitutions_data[4].stop_symbol_ptr = block_ptr;
+        find_substitutions_data[5].start_symbol_ptr = block_ptr;
+        find_substitutions_data[5].stop_symbol_ptr = end_symbol_ptr;
       }
       else {
-        stop_token_ptr = end_token_ptr;
-        find_substitutions_data[0].start_token_ptr = end_token_ptr;
-        find_substitutions_data[0].stop_token_ptr = end_token_ptr;
-        find_substitutions_data[1].start_token_ptr = end_token_ptr;
-        find_substitutions_data[1].stop_token_ptr = end_token_ptr;
-        find_substitutions_data[2].start_token_ptr = end_token_ptr;
-        find_substitutions_data[2].stop_token_ptr = end_token_ptr;
-        find_substitutions_data[3].start_token_ptr = end_token_ptr;
-        find_substitutions_data[3].stop_token_ptr = end_token_ptr;
-        find_substitutions_data[4].start_token_ptr = end_token_ptr;
-        find_substitutions_data[4].stop_token_ptr = end_token_ptr;
-        find_substitutions_data[5].start_token_ptr = end_token_ptr;
-        find_substitutions_data[5].stop_token_ptr = end_token_ptr;
+        stop_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[0].start_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[0].stop_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[1].start_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[1].stop_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[2].start_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[2].stop_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[3].start_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[3].stop_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[4].start_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[4].stop_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[5].start_symbol_ptr = end_symbol_ptr;
+        find_substitutions_data[5].stop_symbol_ptr = end_symbol_ptr;
       }
 
       for (i1 = 0 ; i1 < 6 ; i1++) {
@@ -2444,195 +2433,195 @@ main_overlap_check_loop_end:
         pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,(char *)&find_substitutions_data[i1]);
       }
 
-      unsigned int extra_match_symbols = 0;
-      unsigned short int substitute_index = 0;
-      num_tokens_to_copy = 0;
-      in_token_ptr = start_token_ptr;
-      out_token_ptr = start_token_ptr;
+      U32 extra_match_symbols = 0;
+      U16 substitute_index = 0;
+      num_symbols_to_copy = 0;
+      in_symbol_ptr = start_symbol_ptr;
+      out_symbol_ptr = start_symbol_ptr;
 
       pthread_create(&substitute_thread1,NULL,substitute_thread,NULL);
-      if (in_token_ptr == stop_token_ptr)
-        goto main_token_substitution_loop_end;
-      this_token = *in_token_ptr++;
-      if ((int)this_token >= 0) {
-main_token_substitution_loop_no_match_with_symbol:
-        match_node_ptr = &match_nodes[this_token];
-        if (match_node_ptr->num_tokens) {
-          this_token = *in_token_ptr++;
-          if ((int)this_token >= 0) {
+      if (in_symbol_ptr == stop_symbol_ptr)
+        goto main_symbol_substitution_loop_end;
+      this_symbol = *in_symbol_ptr++;
+      if ((int)this_symbol >= 0) {
+main_symbol_substitution_loop_no_match_with_symbol:
+        match_node_ptr = &match_nodes[this_symbol];
+        if (match_node_ptr->num_symbols) {
+          this_symbol = *in_symbol_ptr++;
+          if ((int)this_symbol >= 0) {
             if (match_node_ptr->child_ptr == 0) {
-              if (num_tokens_to_copy >= 100000) {
-                if ((substitute_index & 0x7FFF) == 0x7FFF);
+              if (num_symbols_to_copy >= 100000) {
+                if ((substitute_index & 0x7FFF) == 0x7FFF)
                   while (substitute_data[substitute_index & 0x8000]);
-                substitute_data[substitute_index++] = num_tokens_to_copy;
-                num_tokens_to_copy = 0;
+                substitute_data[substitute_index++] = num_symbols_to_copy;
+                num_symbols_to_copy = 0;
               }
-              if (in_token_ptr == stop_token_ptr)
-                goto main_token_substitution_loop_end;
-              this_token = *in_token_ptr++;
-              if ((int)this_token >= 0)
-                goto main_token_substitution_loop_no_match_with_symbol;
-              num_tokens_to_copy++;
-              if (in_token_ptr == stop_token_ptr)
-                goto main_token_substitution_loop_end;
-              this_token = *in_token_ptr++;
-              goto main_token_substitution_loop_no_match_with_symbol;
+              if (in_symbol_ptr == stop_symbol_ptr)
+                goto main_symbol_substitution_loop_end;
+              this_symbol = *in_symbol_ptr++;
+              if ((int)this_symbol >= 0)
+                goto main_symbol_substitution_loop_no_match_with_symbol;
+              num_symbols_to_copy++;
+              if (in_symbol_ptr == stop_symbol_ptr)
+                goto main_symbol_substitution_loop_end;
+              this_symbol = *in_symbol_ptr++;
+              goto main_symbol_substitution_loop_no_match_with_symbol;
             }
-main_token_substitution_loop_match_with_child:
+main_symbol_substitution_loop_match_with_child:
             match_node_ptr = match_node_ptr->child_ptr;
-            if (this_token != match_node_ptr->token) {
-              unsigned int sibling_nibble = this_token;
+            if (this_symbol != match_node_ptr->symbol) {
+              U32 sibling_nibble = this_symbol;
               do {
                 if (match_node_ptr->sibling_node_num[sibling_nibble & 0xF]) {
                   match_node_ptr = &match_nodes[match_node_ptr->sibling_node_num[sibling_nibble & 0xF]];
                   sibling_nibble = sibling_nibble >> 4;
                 }
-                else { // no match, so use miss node and output missed tokens
+                else { // no match, so use miss node and output missed symbols
                   if (match_node_ptr->miss_ptr == 0) {
-                    if (match_nodes[this_token].num_tokens) {
-                      if (in_token_ptr > stop_token_ptr) {
-                        num_tokens_to_copy += match_node_ptr->num_tokens - (in_token_ptr - stop_token_ptr);
-                        goto main_token_substitution_loop_end;
+                    if (match_nodes[this_symbol].num_symbols) {
+                      if (in_symbol_ptr > stop_symbol_ptr) {
+                        num_symbols_to_copy += match_node_ptr->num_symbols - (in_symbol_ptr - stop_symbol_ptr);
+                        goto main_symbol_substitution_loop_end;
                       }
                       sibling_nibble = sibling_nibble >> 4;
-                      num_tokens_to_copy += match_node_ptr->num_tokens - 1;
-                      match_node_ptr = &match_nodes[this_token];
+                      num_symbols_to_copy += match_node_ptr->num_symbols - 1;
+                      match_node_ptr = &match_nodes[this_symbol];
                     }
                     else {
-                      if (in_token_ptr >= stop_token_ptr) {
-                        num_tokens_to_copy += match_node_ptr->num_tokens - (in_token_ptr - stop_token_ptr);
-                        goto main_token_substitution_loop_end;
+                      if (in_symbol_ptr >= stop_symbol_ptr) {
+                        num_symbols_to_copy += match_node_ptr->num_symbols - (in_symbol_ptr - stop_symbol_ptr);
+                        goto main_symbol_substitution_loop_end;
                       }
-                      num_tokens_to_copy += match_node_ptr->num_tokens;
-                      if (num_tokens_to_copy >= 100000) {
-                        if ((substitute_index & 0x7FFF) == 0x7FFF);
+                      num_symbols_to_copy += match_node_ptr->num_symbols;
+                      if (num_symbols_to_copy >= 100000) {
+                        if ((substitute_index & 0x7FFF) == 0x7FFF)
                           while (substitute_data[substitute_index & 0x8000]);
-                        substitute_data[substitute_index++] = num_tokens_to_copy;
-                        num_tokens_to_copy = 0;
+                        substitute_data[substitute_index++] = num_symbols_to_copy;
+                        num_symbols_to_copy = 0;
                       }
-                      if (in_token_ptr == stop_token_ptr)
-                        goto main_token_substitution_loop_end;
-                      this_token = *in_token_ptr++;
-                      if ((int)this_token >= 0)
-                        goto main_token_substitution_loop_no_match_with_symbol;
-                      num_tokens_to_copy++;
-                      if (in_token_ptr == stop_token_ptr)
-                        goto main_token_substitution_loop_end;
-                      this_token = *in_token_ptr++;
-                      goto main_token_substitution_loop_no_match_with_symbol;
+                      if (in_symbol_ptr == stop_symbol_ptr)
+                        goto main_symbol_substitution_loop_end;
+                      this_symbol = *in_symbol_ptr++;
+                      if ((int)this_symbol >= 0)
+                        goto main_symbol_substitution_loop_no_match_with_symbol;
+                      num_symbols_to_copy++;
+                      if (in_symbol_ptr == stop_symbol_ptr)
+                        goto main_symbol_substitution_loop_end;
+                      this_symbol = *in_symbol_ptr++;
+                      goto main_symbol_substitution_loop_no_match_with_symbol;
                     }
                   }
                   else {
-                    num_tokens_to_copy += match_node_ptr->num_tokens - match_node_ptr->miss_ptr->num_tokens;
-                    if (in_token_ptr - match_node_ptr->miss_ptr->num_tokens >= stop_token_ptr) {
-                      num_tokens_to_copy -= in_token_ptr - stop_token_ptr - match_node_ptr->miss_ptr->num_tokens;
-                      goto main_token_substitution_loop_end;
+                    num_symbols_to_copy += match_node_ptr->num_symbols - match_node_ptr->miss_ptr->num_symbols;
+                    if (in_symbol_ptr - match_node_ptr->miss_ptr->num_symbols >= stop_symbol_ptr) {
+                      num_symbols_to_copy -= in_symbol_ptr - stop_symbol_ptr - match_node_ptr->miss_ptr->num_symbols;
+                      goto main_symbol_substitution_loop_end;
                     }
                     match_node_ptr = match_node_ptr->miss_ptr;
-                    sibling_nibble = this_token;
+                    sibling_nibble = this_symbol;
                   }
                 }
-              } while (this_token != match_node_ptr->token);
+              } while (this_symbol != match_node_ptr->symbol);
             }
             if (match_node_ptr->child_ptr == 0) { // no child, so found a match
-              if (num_tokens_to_copy) {
-                if ((substitute_index & 0x7FFF) == 0x7FFF);
+              if (num_symbols_to_copy) {
+                if ((substitute_index & 0x7FFF) == 0x7FFF)
                   while (substitute_data[substitute_index & 0x8000]);
-                substitute_data[substitute_index++] = num_tokens_to_copy;
-                num_tokens_to_copy = 0;
+                substitute_data[substitute_index++] = num_symbols_to_copy;
+                num_symbols_to_copy = 0;
               }
               node_score_number = match_node_ptr->score_number;
-              if ((substitute_index & 0x7FFF) == 0x7FFF);
+              if ((substitute_index & 0x7FFF) == 0x7FFF)
                 while (substitute_data[substitute_index & 0x8000]);
-              substitute_data[substitute_index++] = 0x80000000 + match_node_ptr->num_tokens;
-              if ((substitute_index & 0x7FFF) == 0x7FFF);
+              substitute_data[substitute_index++] = 0x80000000 + match_node_ptr->num_symbols;
+              if ((substitute_index & 0x7FFF) == 0x7FFF)
                 while (substitute_data[substitute_index & 0x8000]);
-              substitute_data[substitute_index++] = num_base_tokens + new_token_number[node_score_number];
-              if (in_token_ptr >= stop_token_ptr) {
-                extra_match_symbols = in_token_ptr - stop_token_ptr;
-                goto main_token_substitution_loop_end;
+              substitute_data[substitute_index++] = num_simple_symbols + new_symbol_number[node_score_number];
+              if (in_symbol_ptr >= stop_symbol_ptr) {
+                extra_match_symbols = in_symbol_ptr - stop_symbol_ptr;
+                goto main_symbol_substitution_loop_end;
               }
-              this_token = *in_token_ptr++;
-              if ((int)this_token >= 0)
-                goto main_token_substitution_loop_no_match_with_symbol;
-              num_tokens_to_copy++;
-              if (in_token_ptr == stop_token_ptr)
-                goto main_token_substitution_loop_end;
-              this_token = *in_token_ptr++;
-              goto main_token_substitution_loop_no_match_with_symbol;
+              this_symbol = *in_symbol_ptr++;
+              if ((int)this_symbol >= 0)
+                goto main_symbol_substitution_loop_no_match_with_symbol;
+              num_symbols_to_copy++;
+              if (in_symbol_ptr == stop_symbol_ptr)
+                goto main_symbol_substitution_loop_end;
+              this_symbol = *in_symbol_ptr++;
+              goto main_symbol_substitution_loop_no_match_with_symbol;
             }
-            if (num_tokens_to_copy >= 100000) {
-              if ((substitute_index & 0x7FFF) == 0x7FFF);
+            if (num_symbols_to_copy >= 100000) {
+              if ((substitute_index & 0x7FFF) == 0x7FFF)
                 while (substitute_data[substitute_index & 0x8000]);
-              substitute_data[substitute_index++] = num_tokens_to_copy;
-              num_tokens_to_copy = 0;
+              substitute_data[substitute_index++] = num_symbols_to_copy;
+              num_symbols_to_copy = 0;
             }
-            this_token = *in_token_ptr++;
-            if ((int)this_token >= 0)
-              goto main_token_substitution_loop_match_with_child;
-            num_tokens_to_copy += match_node_ptr->num_tokens + 1;
-            if (in_token_ptr >= stop_token_ptr) {
-              num_tokens_to_copy -= in_token_ptr - stop_token_ptr;
-              goto main_token_substitution_loop_end;
+            this_symbol = *in_symbol_ptr++;
+            if ((int)this_symbol >= 0)
+              goto main_symbol_substitution_loop_match_with_child;
+            num_symbols_to_copy += match_node_ptr->num_symbols + 1;
+            if (in_symbol_ptr >= stop_symbol_ptr) {
+              num_symbols_to_copy -= in_symbol_ptr - stop_symbol_ptr;
+              goto main_symbol_substitution_loop_end;
             }
-            this_token = *in_token_ptr++;
-            goto main_token_substitution_loop_no_match_with_symbol;
+            this_symbol = *in_symbol_ptr++;
+            goto main_symbol_substitution_loop_no_match_with_symbol;
           }
-          else { // define token
-            num_tokens_to_copy += match_node_ptr->num_tokens + 1;
-            if (in_token_ptr >= stop_token_ptr) {
-              num_tokens_to_copy -= in_token_ptr - stop_token_ptr;
-              goto main_token_substitution_loop_end;
+          else { // define symbol
+            num_symbols_to_copy += match_node_ptr->num_symbols + 1;
+            if (in_symbol_ptr >= stop_symbol_ptr) {
+              num_symbols_to_copy -= in_symbol_ptr - stop_symbol_ptr;
+              goto main_symbol_substitution_loop_end;
             }
-            this_token = *in_token_ptr++;
-            goto main_token_substitution_loop_no_match_with_symbol;
+            this_symbol = *in_symbol_ptr++;
+            goto main_symbol_substitution_loop_no_match_with_symbol;
           }
         }
-        if (++num_tokens_to_copy <= 100000) {
-          if (in_token_ptr == stop_token_ptr)
-            goto main_token_substitution_loop_end;
-          this_token = *in_token_ptr++;
-          if ((int)this_token >= 0)
-            goto main_token_substitution_loop_no_match_with_symbol;
-          num_tokens_to_copy++;
-          if (in_token_ptr == stop_token_ptr)
-            goto main_token_substitution_loop_end;
-          this_token = *in_token_ptr++;
-          goto main_token_substitution_loop_no_match_with_symbol;
+        if (++num_symbols_to_copy <= 100000) {
+          if (in_symbol_ptr == stop_symbol_ptr)
+            goto main_symbol_substitution_loop_end;
+          this_symbol = *in_symbol_ptr++;
+          if ((int)this_symbol >= 0)
+            goto main_symbol_substitution_loop_no_match_with_symbol;
+          num_symbols_to_copy++;
+          if (in_symbol_ptr == stop_symbol_ptr)
+            goto main_symbol_substitution_loop_end;
+          this_symbol = *in_symbol_ptr++;
+          goto main_symbol_substitution_loop_no_match_with_symbol;
         }
-        if ((substitute_index & 0x7FFF) == 0x7FFF);
+        if ((substitute_index & 0x7FFF) == 0x7FFF)
           while (substitute_data[substitute_index & 0x8000]);
-        substitute_data[substitute_index++] = num_tokens_to_copy;
-        num_tokens_to_copy = 0;
-        if (in_token_ptr == stop_token_ptr)
-          goto main_token_substitution_loop_end;
-        this_token = *in_token_ptr++;
-        if ((int)this_token >= 0)
-          goto main_token_substitution_loop_no_match_with_symbol;
-        num_tokens_to_copy = 1;
-        if (in_token_ptr == stop_token_ptr)
-          goto main_token_substitution_loop_end;
-        this_token = *in_token_ptr++;
-        goto main_token_substitution_loop_no_match_with_symbol;
+        substitute_data[substitute_index++] = num_symbols_to_copy;
+        num_symbols_to_copy = 0;
+        if (in_symbol_ptr == stop_symbol_ptr)
+          goto main_symbol_substitution_loop_end;
+        this_symbol = *in_symbol_ptr++;
+        if ((int)this_symbol >= 0)
+          goto main_symbol_substitution_loop_no_match_with_symbol;
+        num_symbols_to_copy = 1;
+        if (in_symbol_ptr == stop_symbol_ptr)
+          goto main_symbol_substitution_loop_end;
+        this_symbol = *in_symbol_ptr++;
+        goto main_symbol_substitution_loop_no_match_with_symbol;
       }
-      else { // define token
-        num_tokens_to_copy++;
-        if (in_token_ptr == stop_token_ptr)
-          goto main_token_substitution_loop_end;
-        this_token = *in_token_ptr++;
-        goto main_token_substitution_loop_no_match_with_symbol;
+      else { // define symbol
+        num_symbols_to_copy++;
+        if (in_symbol_ptr == stop_symbol_ptr)
+          goto main_symbol_substitution_loop_end;
+        this_symbol = *in_symbol_ptr++;
+        goto main_symbol_substitution_loop_no_match_with_symbol;
       }
 
-main_token_substitution_loop_end:
-      if (num_tokens_to_copy) {
-        if ((substitute_index & 0x7FFF) == 0x7FFF);
+main_symbol_substitution_loop_end:
+      if (num_symbols_to_copy) {
+        if ((substitute_index & 0x7FFF) == 0x7FFF)
           while (substitute_data[substitute_index & 0x8000]);
-        substitute_data[substitute_index++] = num_tokens_to_copy;
+        substitute_data[substitute_index++] = num_symbols_to_copy;
       }
 
       for (i1 = 0 ; i1 < 6 ; i1++) {
-        unsigned int num_substitutions;
-        unsigned int i2 = 0;
+        U32 num_substitutions;
+        U32 i2 = 0;
 top_sub:
         while (find_substitutions_data[i1].done == 0) {
           num_substitutions = find_substitutions_data[i1].num_substitutions;
@@ -2649,7 +2638,7 @@ top_sub:
               else {
                 find_substitutions_data[i1].done = 0;
                 find_substitutions_data[i1].num_substitutions = 0;
-                find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+                find_substitutions_data[i1].start_symbol_ptr += extra_match_symbols;
                 pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,
                     (char *)&find_substitutions_data[i1]);
                 extra_match_symbols = 0;
@@ -2659,14 +2648,14 @@ top_sub:
             else {
               find_substitutions_data[i1].done = 0;
               find_substitutions_data[i1].num_substitutions = 0;
-              find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+              find_substitutions_data[i1].start_symbol_ptr += extra_match_symbols;
               pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,(char *)&find_substitutions_data[i1]);
               extra_match_symbols = 0;
               goto top_sub;
             }
           }
           while (i2 != num_substitutions) { // send find_substitutions thread data
-            if ((substitute_index & 0x7FFF) == 0x7FFF);
+            if ((substitute_index & 0x7FFF) == 0x7FFF)
               while (substitute_data[substitute_index & 0x8000]);
             substitute_data[substitute_index++] = find_substitutions_data[i1].data[i2 & 0x3FFFFF];
             find_substitutions_data[i1].data[i2 & 0x3FFFFF] = 0;
@@ -2688,7 +2677,7 @@ top_sub:
             else {
               find_substitutions_data[i1].done = 0;
               find_substitutions_data[i1].num_substitutions = 0;
-              find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+              find_substitutions_data[i1].start_symbol_ptr += extra_match_symbols;
               pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,(char *)&find_substitutions_data[i1]);
               extra_match_symbols = 0;
               goto top_sub;
@@ -2697,14 +2686,14 @@ top_sub:
           else {
             find_substitutions_data[i1].done = 0;
             find_substitutions_data[i1].num_substitutions = 0;
-            find_substitutions_data[i1].start_token_ptr += extra_match_symbols;
+            find_substitutions_data[i1].start_symbol_ptr += extra_match_symbols;
             pthread_create(&find_substitutions_threads[i1],NULL,find_substitutions_thread,(char *)&find_substitutions_data[i1]);
             extra_match_symbols = 0;
             goto top_sub;
           }
         }
         while (i2 != num_substitutions) { // send find_substitutions thread data
-          if ((substitute_index & 0x7FFF) == 0x7FFF);
+          if ((substitute_index & 0x7FFF) == 0x7FFF)
             while (substitute_data[substitute_index & 0x8000]);
           substitute_data[substitute_index++] = find_substitutions_data[i1].data[i2 & 0x3FFFFF];
           find_substitutions_data[i1].data[i2 & 0x3FFFFF] = 0;
@@ -2713,30 +2702,30 @@ top_sub:
         extra_match_symbols += find_substitutions_data[i1].extra_match_symbols;
       }
 
-      if ((substitute_index & 0x7FFF) == 0x7FFF);
+      if ((substitute_index & 0x7FFF) == 0x7FFF)
         while (substitute_data[substitute_index]);
       substitute_data[substitute_index] = 0xFFFFFFFF;
       pthread_join(substitute_thread1,NULL);
 
-      // Add the new token definitions to the end of the data
+      // Add the new symbol definitions to the end of the data
       i1 = 0;
       while (i1 < num_node_scores) {
         if (node_scores_bad[i1] == 0) {
-          unsigned int *match_string_ptr, *match_string_end_ptr;
-          *out_token_ptr++ = first_token_number + num_tokens_defined++;
-          match_string_ptr = match_strings + max_string_length * (unsigned int)i1;
-          match_string_end_ptr = match_string_ptr + node_scores[node_scores_index[i1++]].num_tokens;
+          U32 *match_string_ptr, *match_string_end_ptr;
+          *out_symbol_ptr++ = first_symbol_number + num_compound_symbols++;
+          match_string_ptr = match_strings + max_string_length * (U32)i1;
+          match_string_end_ptr = match_string_ptr + node_scores[node_scores_index[i1++]].num_symbols;
           while (match_string_ptr != match_string_end_ptr) {
-            token_count[*match_string_ptr] -= token_count[num_base_tokens+num_tokens_defined-1] - 1;
-            *out_token_ptr++ = *match_string_ptr++;
+            symbol_count[*match_string_ptr] -= symbol_count[num_simple_symbols+num_compound_symbols-1] - 1;
+            *out_symbol_ptr++ = *match_string_ptr++;
           }
         }
         else
           node_scores_bad[i1++] = 0;
       }
-      end_token_ptr = out_token_ptr;
-      *end_token_ptr = 0xFFFFFFFE;
-      free_RAM_ptr = (unsigned char *)(end_token_ptr + 1);
+      end_symbol_ptr = out_symbol_ptr;
+      *end_symbol_ptr = 0xFFFFFFFE;
+      free_RAM_ptr = (U8 *)(end_symbol_ptr + 1);
     }
 
     if (num_node_scores) {
@@ -2745,37 +2734,31 @@ top_sub:
           if (min_score < prior_min_score) {
             if (scan_cycle > 50) {
               if (scan_cycle > 100)
-//                new_min_score = 0.993 * min_score * (min_score / prior_min_score) - 0.05;
-                new_min_score = 0.993 * min_score * (min_score / prior_min_score) - 0.05;
+                new_min_score = 0.993 * min_score * (min_score / prior_min_score);
               else
-//                new_min_score = 0.99 * min_score * (min_score / prior_min_score) - 0.1;
-                new_min_score = 0.99 * min_score * (min_score / prior_min_score) - 0.1;
+                new_min_score = 0.99 * min_score * (min_score / prior_min_score);
             }
             else
-//              new_min_score = 0.98 * min_score * (min_score / prior_min_score) - 0.1;
-              new_min_score = 0.98 * min_score * (min_score / prior_min_score) - 0.1;
+              new_min_score = 0.98 * min_score * (min_score / prior_min_score);
           }
           else
-//            new_min_score = 0.475 * (prior_min_score + min_score);
             new_min_score = 0.47 * (prior_min_score + min_score);
         }
         else {
           if (min_score < prior_min_score)
-//            new_min_score = 0.96 * min_score * (min_score / prior_min_score) - 0.2;
-            new_min_score = 0.95 * min_score * (min_score / prior_min_score) - 0.2;
+            new_min_score = 0.95 * min_score * (min_score / prior_min_score);
           else
-//            new_min_score = 0.46 * (prior_min_score + min_score) - 0.2;
-            new_min_score = 0.45 * (prior_min_score + min_score) - 0.2;
+            new_min_score = 0.45 * (prior_min_score + min_score);
         }
       }
       else {
-        new_min_score = (double)(0.75 * node_scores[node_scores_index[num_node_scores-1]].score);
+        new_min_score = (double)(0.75 * min_score);
         prior_min_score = min_score;
       }
     }
 
-    else if (min_score > 0.5) {
-      new_min_score = 0.5;
+    else if (min_score > 0.000000001) {
+      new_min_score = 0.000000001;
       num_node_scores = 1;
     }
     if (min_score < prior_min_score)
@@ -2784,88 +2767,87 @@ top_sub:
       min_score = new_min_score;
     else
       min_score = 0.98 * prior_min_score;
-    if (min_score < 0.5)
-      min_score = 0.5;
+    if (min_score < 0.000000001)
+      min_score = 0.000000001;
 
-    max_scores = (max_scores + 2 * (((29 * (num_base_tokens + num_tokens_defined - num_start_tokens)) >> 5) + 7000)) / 3;
+    max_scores = (max_scores + 2 * (((29 * (num_simple_symbols + num_compound_symbols - num_start_symbols)) >> 5) + 5000)) / 3;
     if (max_scores > MAX_SCORES)
       max_scores = MAX_SCORES;
 
     if (num_node_scores == 0) {
 write_file:
-      sprintf(out_file_name,"%s",argv[arg_num]);
-      if ((fd_out = fopen(out_file_name,"wb+")) == NULL) {
-        fprintf(stderr,"ERROR - unable to open output file '%s'\n",out_file_name);
+      if ((fd_out = fopen(argv[arg_num],"wb+")) == NULL) {
+        fprintf(stderr,"ERROR - unable to open output file '%s'\n",argv[arg_num]);
         exit(0);
       }
 
       in_char_ptr = char_buffer;
       *in_char_ptr++ = cap_encoded + (delta_gap * 2);
-      in_token_ptr = start_token_ptr;
+      in_symbol_ptr = start_symbol_ptr;
       if (UTF8_compliant) {
-        while (in_token_ptr != end_token_ptr) {
-          unsigned int token_value;
-          token_value = *in_token_ptr++;
-          if (token_value < 0x80)
-            *in_char_ptr++ = (unsigned char)token_value;
-          else if (token_value < 0x800) {
-            *in_char_ptr++ = 0xC0 + (token_value >> 6);
-            *in_char_ptr++ = 0x80 + (token_value & 0x3F);
+        while (in_symbol_ptr != end_symbol_ptr) {
+          U32 symbol_value;
+          symbol_value = *in_symbol_ptr++;
+          if (symbol_value < 0x80)
+            *in_char_ptr++ = (U8)symbol_value;
+          else if (symbol_value < 0x800) {
+            *in_char_ptr++ = 0xC0 + (symbol_value >> 6);
+            *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
           }
-          else if (token_value < 0x10000) {
-            *in_char_ptr++ = 0xE0 + (token_value >> 12);
-            *in_char_ptr++ = 0x80 + ((token_value >> 6) & 0x3F);
-            *in_char_ptr++ = 0x80 + (token_value & 0x3F);
+          else if (symbol_value < 0x10000) {
+            *in_char_ptr++ = 0xE0 + (symbol_value >> 12);
+            *in_char_ptr++ = 0x80 + ((symbol_value >> 6) & 0x3F);
+            *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
           }
-          else if (token_value < START_MY_TOKENS) {
-            *in_char_ptr++ = 0xF0 + (token_value >> 18);
-            *in_char_ptr++ = 0x80 + ((token_value >> 12) & 0x3F);
-            *in_char_ptr++ = 0x80 + ((token_value >> 6) & 0x3F);
-            *in_char_ptr++ = 0x80 + (token_value & 0x3F);
+          else if (symbol_value < START_MY_SYMBOLS) {
+            *in_char_ptr++ = 0xF0 + (symbol_value >> 18);
+            *in_char_ptr++ = 0x80 + ((symbol_value >> 12) & 0x3F);
+            *in_char_ptr++ = 0x80 + ((symbol_value >> 6) & 0x3F);
+            *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
           }
-          else if ((int)token_value >= 0) {
-            token_value -= START_MY_TOKENS;
-            *in_char_ptr++ = INSERT_TOKEN_CHAR;
-            *in_char_ptr++ = (unsigned char)((token_value >> 16) & 0xFF);
-            *in_char_ptr++ = (unsigned char)((token_value >> 8) & 0xFF);
-            *in_char_ptr++ = (unsigned char)(token_value & 0xFF);
+          else if ((int)symbol_value >= 0) {
+            symbol_value -= START_MY_SYMBOLS;
+            *in_char_ptr++ = INSERT_SYMBOL_CHAR;
+            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
           }
           else {
-            token_value -= 0x80000000 + START_MY_TOKENS;
-            *in_char_ptr++ = DEFINE_TOKEN_CHAR;
-            *in_char_ptr++ = (unsigned char)((token_value >> 16) & 0xFF);
-            *in_char_ptr++ = (unsigned char)((token_value >> 8) & 0xFF);
-            *in_char_ptr++ = (unsigned char)(token_value & 0xFF);
+            symbol_value -= 0x80000000 + START_MY_SYMBOLS;
+            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
           }
         }
       }
       else {
-        while (in_token_ptr != end_token_ptr) {
-          unsigned int token_value;
-          token_value = *in_token_ptr++;
-          if (token_value < INSERT_TOKEN_CHAR)
-            *in_char_ptr++ = (unsigned char)token_value;
-          else if (token_value == INSERT_TOKEN_CHAR) {
-            *in_char_ptr++ = INSERT_TOKEN_CHAR;
-            *in_char_ptr++ = DEFINE_TOKEN_CHAR;
+        while (in_symbol_ptr != end_symbol_ptr) {
+          U32 symbol_value;
+          symbol_value = *in_symbol_ptr++;
+          if (symbol_value < INSERT_SYMBOL_CHAR)
+            *in_char_ptr++ = (U8)symbol_value;
+          else if (symbol_value == INSERT_SYMBOL_CHAR) {
+            *in_char_ptr++ = INSERT_SYMBOL_CHAR;
+            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
           }
-          else if (token_value == DEFINE_TOKEN_CHAR) {
-            *in_char_ptr++ = DEFINE_TOKEN_CHAR;
-            *in_char_ptr++ = DEFINE_TOKEN_CHAR;
+          else if (symbol_value == DEFINE_SYMBOL_CHAR) {
+            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
           }
-          else if ((int)token_value >= 0) {
-            token_value -= 0x100;
-            *in_char_ptr++ = INSERT_TOKEN_CHAR;
-            *in_char_ptr++ = (unsigned char)((token_value >> 16) & 0xFF);
-            *in_char_ptr++ = (unsigned char)((token_value >> 8) & 0xFF);
-            *in_char_ptr++ = (unsigned char)(token_value & 0xFF);
+          else if ((int)symbol_value >= 0) {
+            symbol_value -= 0x100;
+            *in_char_ptr++ = INSERT_SYMBOL_CHAR;
+            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
           }
           else {
-            token_value -= 0x80000000 + 0x100;
-            *in_char_ptr++ = DEFINE_TOKEN_CHAR;
-            *in_char_ptr++ = (unsigned char)((token_value >> 16) & 0xFF);
-            *in_char_ptr++ = (unsigned char)((token_value >> 8) & 0xFF);
-            *in_char_ptr++ = (unsigned char)(token_value & 0xFF);
+            symbol_value -= 0x80000000 + 0x100;
+            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
           }
         }
       }
@@ -2882,8 +2864,10 @@ write_file:
     }
   } while (num_node_scores);
 
-  free(start_token_ptr);
-  fprintf(stderr,"\nRun time %0.3f seconds.\n", (float)((unsigned long long)clock()-start_time)/1000);
+  free(start_symbol_ptr);
+  fprintf(stderr,"Constructed %u rule grammar in %0.3f seconds.\n",
+      num_compound_symbols,(float)(clock()-start_time)/CLOCKS_PER_SEC);
+  return(0);
 }
 
 

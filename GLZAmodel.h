@@ -1,6 +1,6 @@
 /***********************************************************************
 
-Copyright 2015 Kennon Conrad
+Copyright 2015 - 2016 Kennon Conrad
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ limitations under the License.
 enum { TOP = 1 << 24, BUF_SIZE = 0x80000 };
 enum { UP_FREQ_SYM_TYPE = 1, FREQ_SYM_TYPE_BOT = 0x40 };
 enum { UP_FREQ_MTF_QUEUE_NUM2 = 4, UP_FREQ_MTF_QUEUE_NUM = 10, FREQ_MTF_QUEUE_NUM_BOT = 0x100 };
-enum { UP_FREQ_MTF_QUEUE_POS = 5, FREQ_MTF_QUEUE_POS_BOT = 0x4000 };
-enum { UP_FREQ_MTFG_QUEUE_POS = 2, FREQ_MTFG_QUEUE_POS_BOT = 0x4000 };
+enum { UP_FREQ_MTF_QUEUE_POS = 3, FREQ_MTF_QUEUE_POS_BOT = 0x2000 };
+enum { UP_FREQ_MTFG_QUEUE_POS = 8, FREQ_MTFG_QUEUE_POS_BOT = 0x4000 };
 enum { UP_FREQ_SID = 3, FREQ_SID_BOT = 0x1000 };
 enum { UP_FREQ_INST = 8, FREQ_INST_BOT = 0x8000 };
 enum { UP_FREQ_ERG = 1, FREQ_ERG_BOT = 0x20 };
@@ -29,26 +29,26 @@ enum { UP_FREQ_FIRST_CHAR = 8, FREQ_FIRST_CHAR_BOT = 0x2000 };
 enum { NOT_CAP = 0, CAP = 1 };
 enum { LEVEL0 = 0, LEVEL1 = 1, LEVEL0_CAP = 2, LEVEL1_CAP = 3 };
 
-unsigned int NumInChar, InCharNum, OutCharNum;
-unsigned int RangeLow, RangeHigh, count, BaseSymbol, SymbolIndex, BinCode, FirstChar;
-unsigned int low, code, range;
-unsigned char InBuffer[BUF_SIZE], OutBuffer0[BUF_SIZE], OutBuffer1[BUF_SIZE], OutBufferNum, *OutBuffer;
-unsigned char Symbol, SIDSymbol, FoundIndex, mtfg_queue_position, mtf_queue_number, Instances, CodeLength;
-unsigned char SymbolFirstChar[4][0x100][0x100];
-unsigned char RangeScaleSymType[4], RangeScaleERG[3], RangeScaleWordTag;
-unsigned char FreqSymType[4][4], FreqERG[3], FreqWordTag;
-unsigned short int RangeScaleMtfQueueNum[2], RangeScaleMtfQueuePos[2][14], RangeScaleMtfgQueuePos[2];
-unsigned short int RangeScaleSID[2], RangeScaleINST[2][16];
-unsigned short int RangeScaleFirstChar[4][0x100];
-unsigned short int RangeScaleFirstCharSection[0x100][7];
-unsigned short int FreqMtfQueueNum[2][14], FreqMtfQueuePos[2][14][64], FreqMtfgQueuePos[2][256];
-unsigned short int FreqSID[2][16], FreqINST[2][16][38], FreqFirstChar[4][0x100][0x100], FreqFirstCharBinary[0x100][0x100];
-unsigned short int DictionaryBins, BinNum;
+U32 NumInChar, InCharNum, OutCharNum;
+U32 RangeLow, RangeHigh, count, BaseSymbol, SymbolIndex, BinCode, FirstChar;
+U32 low, code, range;
+U8 InBuffer[BUF_SIZE], OutBuffer0[BUF_SIZE], OutBuffer1[BUF_SIZE], OutBufferNum, *OutBuffer;
+U8 Symbol, SIDSymbol, FoundIndex, mtfg_queue_position, mtf_queue_number, Instances, CodeLength;
+U8 SymbolFirstChar[4][0x100][0x100];
+U8 RangeScaleSymType[4], RangeScaleERG[3], RangeScaleWordTag;
+U8 FreqSymType[4][4], FreqERG[3], FreqWordTag;
+U16 RangeScaleMtfQueueNum[2], RangeScaleMtfQueuePos[2][14], RangeScaleMtfgQueuePos[2];
+U16 RangeScaleSID[2], RangeScaleINST[2][16];
+U16 RangeScaleFirstChar[4][0x100];
+U16 RangeScaleFirstCharSection[0x100][7];
+U16 FreqMtfQueueNum[2][14], FreqMtfQueuePos[2][14][64], FreqMtfgQueuePos[2][256];
+U16 FreqSID[2][16], FreqINST[2][16][38], FreqFirstChar[4][0x100][0x100], FreqFirstCharBinary[0x100][0x100];
+U16 DictionaryBins, BinNum;
 FILE * InFile, * OutFile;
 
 
 #define StartModelSymType() {               \
-  char i = 3;                               \
+  U8 i = 3;                                 \
   do {                                      \
     FreqSymType[i][0] = 1;                  \
     FreqSymType[i][1] = 5;                  \
@@ -70,86 +70,58 @@ FILE * InFile, * OutFile;
     }                                       \
   } while (i--);                            \
 }
-#define StartModelMtfQueueNum() {    \
-  unsigned char i = 1;               \
-  do {                               \
-    unsigned char j = 13;            \
-    do {                             \
-      FreqMtfQueueNum[i][j] = 8;     \
-    } while (j--);                   \
-    RangeScaleMtfQueueNum[i] = 112;  \
-  } while (i--);                     \
+#define StartModelMtfQueueNum() {   \
+  U8 i = 1;                         \
+  do {                              \
+    U8 j = 13;                      \
+    do {                            \
+      FreqMtfQueueNum[i][j] = 4;    \
+    } while (j--);                  \
+    RangeScaleMtfQueueNum[i] = 56;  \
+  } while (i--);                    \
 }
-#define StartModelMtfQueuePos() {        \
-  unsigned char i = 1;                   \
-  do {                                   \
-    unsigned char j = 13;                \
-    do {                                 \
-      unsigned char k = 63;              \
-      do {                               \
-        FreqMtfQueuePos[i][j][k] = 1;    \
-      } while (k--);                     \
-      RangeScaleMtfQueuePos[i][j] = 64;  \
-    } while (j--);                       \
-  } while (i--);                         \
+#define StartModelMtfQueuePos() {                                 \
+  U8 i = 1;                                                       \
+  do {                                                            \
+    U8 j = 13;                                                    \
+    do {                                                          \
+      RangeScaleMtfQueuePos[i][j] = 0;                            \
+      U8 k = 63;                                                  \
+      do {                                                        \
+        FreqMtfQueuePos[i][j][k] = 64 / (k + 1);                  \
+        RangeScaleMtfQueuePos[i][j] += FreqMtfQueuePos[i][j][k];  \
+      } while (k--);                                              \
+    } while (j--);                                                \
+  } while (i--);                                                  \
 }
-#define StartModelMtfgQueuePos() {                \
-  unsigned char i = 1;                            \
-  do {                                            \
-    unsigned char j = 0;                          \
-    do {                                          \
-      FreqMtfgQueuePos[i][j] = 128;               \
-    } while (++j != 5);                           \
-    do {                                          \
-      FreqMtfgQueuePos[i][j] = 64;                \
-    } while (++j != 8);                           \
-    do {                                          \
-      FreqMtfgQueuePos[i][j] = 32;                \
-    } while (++j != 16);                          \
-    if (max_regular_code_length > 11) {           \
-      do {                                        \
-        FreqMtfgQueuePos[i][j] = 16;              \
-      } while (++j != 32);                        \
-      if (max_regular_code_length > 12) {         \
-        do {                                      \
-          FreqMtfgQueuePos[i][j] = 8;             \
-        } while (++j != 64);                      \
-        if (max_regular_code_length > 13) {       \
-          do {                                    \
-            FreqMtfgQueuePos[i][j] = 4;           \
-          } while (++j != 128);                   \
-          if (max_regular_code_length > 14) {     \
-            do {                                  \
-              FreqMtfgQueuePos[i][j] = 2;         \
-            } while (++j != 192);                 \
-            if (max_regular_code_length > 15) {   \
-              do {                                \
-                FreqMtfgQueuePos[i][j] = 1;       \
-              } while (++j);                      \
-              RangeScaleMtfgQueuePos[i] = 0x800;  \
-            }                                     \
-            else                                  \
-              RangeScaleMtfgQueuePos[i] = 0x7C0;  \
-          }                                       \
-          else                                    \
-            RangeScaleMtfgQueuePos[i] = 0x740;    \
-        }                                         \
-        else                                      \
-          RangeScaleMtfgQueuePos[i] = 0x640;      \
-      }                                           \
-      else                                        \
-        RangeScaleMtfgQueuePos[i] = 0x540;        \
-    }                                             \
-    else                                          \
-      RangeScaleMtfgQueuePos[i] = 0x440;          \
-    while (j)                                     \
-      FreqMtfgQueuePos[i][j++] = 0;               \
-  } while (i--);                                  \
+#define StartModelMtfgQueuePos() {                          \
+  U32 max_value;                                            \
+  if (max_regular_code_length >= 16)                        \
+    max_value = 0x100;                                      \
+  else if (max_regular_code_length == 15)                   \
+    max_value = 0xC0;                                       \
+  else if (max_regular_code_length == 14)                   \
+    max_value = 0x80;                                       \
+  else if (max_regular_code_length == 13)                   \
+    max_value = 0x40;                                       \
+  else if (max_regular_code_length == 12)                   \
+    max_value = 0x20;                                       \
+  else                                                      \
+    max_value = 0x10;                                       \
+  U8 i = 1;                                                 \
+  do {                                                      \
+    RangeScaleMtfgQueuePos[i] = 0;                          \
+    U8 j = 0;                                               \
+    do {                                                    \
+      FreqMtfgQueuePos[i][j] = max_value / (j + 1);         \
+      RangeScaleMtfgQueuePos[i] += FreqMtfgQueuePos[i][j];  \
+    } while (++j);                                          \
+  } while (i--);                                            \
 }
 #define StartModelSID() {   \
-  unsigned char i = 1;      \
+  U8 i = 1;                 \
   do {                      \
-    unsigned char j = 15;   \
+    U8 j = 15;              \
     do {                    \
       FreqSID[i][j] = 1;    \
     } while (j--);          \
@@ -157,11 +129,11 @@ FILE * InFile, * OutFile;
   } while (i--);            \
 }
 #define StartModelINST(num_inst_codes) {      \
-  unsigned char i = 1;                        \
+  U8 i = 1;                                   \
   do {                                        \
-    unsigned char j = 15;                     \
+    U8 j = 15;                                \
     do {                                      \
-      unsigned char k = num_inst_codes - 1;   \
+      U8 k = num_inst_codes - 1;              \
       do {                                    \
         FreqINST[i][j][k] = 1;                \
       } while (k--);                          \
@@ -181,26 +153,26 @@ FILE * InFile, * OutFile;
   FreqWordTag = 1;             \
   RangeScaleWordTag = 2;       \
 }
-#define StartModelFirstChar() {            \
-  unsigned char i = 0xFF;                  \
-  do {                                     \
-    unsigned char j = 0xFF;                \
-    do {                                   \
-      FreqFirstChar[0][i][j] = 0;          \
-      FreqFirstChar[1][i][j] = 0;          \
-      FreqFirstChar[2][i][j] = 0;          \
-      FreqFirstChar[3][i][j] = 0;          \
-    } while (j--);                         \
-    RangeScaleFirstChar[0][i] = 0;         \
-    RangeScaleFirstChar[1][i] = 0;         \
-    RangeScaleFirstChar[2][i] = 0;         \
-    RangeScaleFirstChar[3][i] = 0;         \
-  } while (i--);                           \
+#define StartModelFirstChar() {     \
+  U8 i = 0xFF;                      \
+  do {                              \
+    U8 j = 0xFF;                    \
+    do {                            \
+      FreqFirstChar[0][i][j] = 0;   \
+      FreqFirstChar[1][i][j] = 0;   \
+      FreqFirstChar[2][i][j] = 0;   \
+      FreqFirstChar[3][i][j] = 0;   \
+    } while (j--);                  \
+    RangeScaleFirstChar[0][i] = 0;  \
+    RangeScaleFirstChar[1][i] = 0;  \
+    RangeScaleFirstChar[2][i] = 0;  \
+    RangeScaleFirstChar[3][i] = 0;  \
+  } while (i--);                    \
 }
 #define StartModelFirstCharBinary() {      \
-  unsigned char i = 0xFF;                  \
+  U8 i = 0xFF;                             \
   do {                                     \
-    unsigned char j = 0xFF;                \
+    U8 j = 0xFF;                           \
     do {                                   \
       FreqFirstCharBinary[i][j] = 0;       \
     } while (j--);                         \
@@ -220,24 +192,24 @@ FILE * InFile, * OutFile;
   RangeScaleSymType[Context] += FreqSymType[Context][2] = (FreqSymType[Context][2] + 1) >> 1;  \
   RangeScaleSymType[Context] += FreqSymType[Context][3] = (FreqSymType[Context][3] + 1) >> 1;  \
 }
-#define rescaleMtfQueueNum(Context) {                                                                       \
-  unsigned char i = 12;                                                                                     \
-  RangeScaleMtfQueueNum[Context] = FreqMtfQueueNum[Context][13] -= (FreqMtfQueueNum[Context][13] >> 2);     \
-  do {                                                                                                      \
-    RangeScaleMtfQueueNum[Context] += (FreqMtfQueueNum[Context][i] -= (FreqMtfQueueNum[Context][i] >> 2));  \
-  } while (i--);                                                                                            \
+#define rescaleMtfQueueNum(Context) {                                                                        \
+  U8 i = 12;                                                                                                 \
+  RangeScaleMtfQueueNum[Context] = FreqMtfQueueNum[Context][13] = (FreqMtfQueueNum[Context][13] + 4) >> 1;   \
+  do {                                                                                                       \
+    RangeScaleMtfQueueNum[Context] += FreqMtfQueueNum[Context][i] = (FreqMtfQueueNum[Context][i] + 4) >> 1;  \
+  } while (i--);                                                                                             \
 }
 #define rescaleMtfQueuePos(Context, mtf_queue_number) {                                                \
-  unsigned char i = 62;                                                                                \
-  RangeScaleMtfQueuePos[Context][mtf_queue_number] = (FreqMtfQueuePos[Context][mtf_queue_number][63]   \
-      = (FreqMtfQueuePos[Context][mtf_queue_number][63] + 1) >> 1);                                    \
+  U8 i = 62;                                                                                           \
+  RangeScaleMtfQueuePos[Context][mtf_queue_number] = FreqMtfQueuePos[Context][mtf_queue_number][63]    \
+      = (FreqMtfQueuePos[Context][mtf_queue_number][63] + 1) >> 1;                                     \
   do {                                                                                                 \
     RangeScaleMtfQueuePos[Context][mtf_queue_number] += FreqMtfQueuePos[Context][mtf_queue_number][i]  \
         = (FreqMtfQueuePos[Context][mtf_queue_number][i] + 1) >> 1;                                    \
   } while (i--);                                                                                       \
 }
 #define rescaleMtfQueuePosQ0(Context) {                                  \
-  unsigned char i = 62;                                                  \
+  U8 i = 62;                                                             \
   RangeScaleMtfQueuePos[Context][0] = (FreqMtfQueuePos[Context][0][63]   \
       = (FreqMtfQueuePos[Context][0][63] + 1) >> 1);                     \
   do {                                                                   \
@@ -246,28 +218,28 @@ FILE * InFile, * OutFile;
   } while (i--);                                                         \
 }
 #define rescaleMtfgQueuePos(Context) {                                                                          \
-  unsigned char i = 1;                                                                                          \
+  U8 i = 1;                                                                                                     \
   RangeScaleMtfgQueuePos[Context] = FreqMtfgQueuePos[Context][0] = (FreqMtfgQueuePos[Context][0] + 1) >> 1;     \
   do {                                                                                                          \
     RangeScaleMtfgQueuePos[Context] += FreqMtfgQueuePos[Context][i] = (FreqMtfgQueuePos[Context][i] + 1) >> 1;  \
   } while (++i);                                                                                                \
 }
 #define rescaleSID(Context) {                                                        \
-  unsigned char i = 14;                                                              \
+  U8 i = 14;                                                                         \
   RangeScaleSID[Context] = FreqSID[Context][15] = (FreqSID[Context][15] + 1) >> 1;   \
   do {                                                                               \
     RangeScaleSID[Context] += FreqSID[Context][i] = (FreqSID[Context][i] + 1) >> 1;  \
   } while (i--);                                                                     \
 }
 #define rescaleINST(Context) {                                                                                           \
-  unsigned char i = 34;                                                                                                  \
+  U8 i = 34;                                                                                                             \
   RangeScaleINST[Context][SIDSymbol] = (FreqINST[Context][SIDSymbol][35] = (FreqINST[Context][SIDSymbol][35] + 1) >> 1); \
   do {                                                                                                                   \
     RangeScaleINST[Context][SIDSymbol] += FreqINST[Context][SIDSymbol][i] = (FreqINST[Context][SIDSymbol][i] + 1) >> 1;  \
   } while (i--);                                                                                                         \
 }
 #define rescaleINST1(Context) {                                                                   \
-  unsigned char i = 34;                                                                           \
+  U8 i = 34;                                                                                      \
   RangeScaleINST[Context][0] = (FreqINST[Context][0][35] = (FreqINST[Context][0][35] + 1) >> 1);  \
   do {                                                                                            \
     RangeScaleINST[Context][0] += FreqINST[Context][0][i] = (FreqINST[Context][0][i] + 1) >> 1;   \
@@ -282,7 +254,7 @@ FILE * InFile, * OutFile;
   FreqWordTag = (FreqWordTag + 1) >> 1;              \
 }
 #define rescaleFirstChar(SymType, Context) {                                     \
-  unsigned char i = 0xFE;                                                        \
+  U8 i = 0xFE;                                                                   \
   RangeScaleFirstChar[SymType][Context] = FreqFirstChar[SymType][Context][0xFF]  \
       = (FreqFirstChar[SymType][Context][0xFF] + 1) >> 1;                        \
   do {                                                                           \
@@ -292,7 +264,7 @@ FILE * InFile, * OutFile;
 }
 #define rescaleFirstCharBinary(Context) {                                                                             \
   RangeScaleFirstChar[0][Context] = FreqFirstCharBinary[Context][0] = (FreqFirstCharBinary[Context][0] + 1) >> 1;     \
-  unsigned char i = 1;                                                                                                \
+  U8 i = 1;                                                                                                           \
   do {                                                                                                                \
     RangeScaleFirstChar[0][Context] += FreqFirstCharBinary[Context][i] = (FreqFirstCharBinary[Context][i] + 1) >> 1;  \
   } while (++i != 0x20);                                                                                              \
@@ -326,6 +298,178 @@ FILE * InFile, * OutFile;
     RangeScaleFirstChar[0][Context] += FreqFirstCharBinary[Context][i] = (FreqFirstCharBinary[Context][i] + 1) >> 1;  \
   } while (++i);                                                                                                      \
 }
+#define InitNewFirstCharBin(trailing_symbol, leading_symbol, code_length) {  \
+  if (RangeScaleFirstChar[0][trailing_symbol]) {                             \
+    U8 j2 = leading_symbol;                                                  \
+    while (SymbolFirstChar[0][trailing_symbol][j2] != (U8)leading_symbol)    \
+      j2++;                                                                  \
+    if (code_length < 8) {                                                   \
+      FreqFirstChar[0][trailing_symbol][j2] = 1 << (8 - code_length);        \
+      RangeScaleFirstChar[0][trailing_symbol] += 1 << (8 - code_length);     \
+    }                                                                        \
+    else {                                                                   \
+      FreqFirstChar[0][trailing_symbol][j2] = 1;                             \
+      RangeScaleFirstChar[0][trailing_symbol] += 1;                          \
+    }                                                                        \
+    if (RangeScaleFirstChar[0][trailing_symbol] > FREQ_FIRST_CHAR_BOT)       \
+      rescaleFirstChar(0, trailing_symbol);                                  \
+    j2 = leading_symbol;                                                     \
+    while (SymbolFirstChar[1][trailing_symbol][j2] != (U8)leading_symbol)    \
+      j2++;                                                                  \
+    if (code_length < 8) {                                                   \
+      FreqFirstChar[1][trailing_symbol][j2] = 1 << (8 - code_length);        \
+      RangeScaleFirstChar[1][trailing_symbol] += 1 << (8 - code_length);     \
+    }                                                                        \
+    else {                                                                   \
+      FreqFirstChar[1][trailing_symbol][j2] = 1;                             \
+      RangeScaleFirstChar[1][trailing_symbol] += 1;                          \
+    }                                                                        \
+    if (RangeScaleFirstChar[1][trailing_symbol] > FREQ_FIRST_CHAR_BOT)       \
+      rescaleFirstChar(1, trailing_symbol);                                  \
+    j2 = leading_symbol;                                                     \
+    while (SymbolFirstChar[2][trailing_symbol][j2] != (U8)leading_symbol)    \
+      j2++;                                                                  \
+    if (code_length < 8) {                                                   \
+      FreqFirstChar[2][trailing_symbol][j2] = 1 << (8 - code_length);        \
+      RangeScaleFirstChar[2][trailing_symbol] += 1 << (8 - code_length);     \
+    }                                                                        \
+    else {                                                                   \
+      FreqFirstChar[2][trailing_symbol][j2] = 1;                             \
+      RangeScaleFirstChar[2][trailing_symbol] += 1;                          \
+    }                                                                        \
+    if (RangeScaleFirstChar[2][trailing_symbol] > FREQ_FIRST_CHAR_BOT)       \
+      rescaleFirstChar(2, trailing_symbol);                                  \
+    j2 = leading_symbol;                                                     \
+    while (SymbolFirstChar[3][trailing_symbol][j2] != (U8)leading_symbol)    \
+      j2++;                                                                  \
+    if (code_length < 8) {                                                   \
+      FreqFirstChar[3][trailing_symbol][j2] = 1 << (8 - code_length);        \
+      RangeScaleFirstChar[3][trailing_symbol] += 1 << (8 - code_length);     \
+    }                                                                        \
+    else {                                                                   \
+      FreqFirstChar[3][trailing_symbol][j2] = 1;                             \
+      RangeScaleFirstChar[3][trailing_symbol] += 1;                          \
+    }                                                                        \
+    if (RangeScaleFirstChar[3][trailing_symbol] > FREQ_FIRST_CHAR_BOT)       \
+      rescaleFirstChar(3, trailing_symbol);                                  \
+  }                                                                          \
+}
+#define InitNewFirstCharBinBinary(trailing_symbol, leading_symbol, code_length) {      \
+  if (RangeScaleFirstChar[0][trailing_symbol]) {                                       \
+    if (code_length < 8) {                                                             \
+      FreqFirstCharBinary[trailing_symbol][leading_symbol] = 1 << (8 - code_length);   \
+      RangeScaleFirstChar[0][trailing_symbol] += 1 << (8 - code_length);               \
+      if (leading_symbol < 0x80) {                                                     \
+        RangeScaleFirstCharSection[trailing_symbol][3] += 1 << (8 - code_length);      \
+        if (leading_symbol < 0x40) {                                                   \
+          RangeScaleFirstCharSection[trailing_symbol][1] += 1 << (8 - code_length);    \
+          if (leading_symbol < 0x20)                                                   \
+            RangeScaleFirstCharSection[trailing_symbol][0] += 1 << (8 - code_length);  \
+        }                                                                              \
+        else if (leading_symbol < 0x60)                                                \
+          RangeScaleFirstCharSection[trailing_symbol][2] += 1 << (8 - code_length);    \
+      }                                                                                \
+      else if (leading_symbol < 0xC0) {                                                \
+        RangeScaleFirstCharSection[trailing_symbol][5] += 1 << (8 - code_length);      \
+        if (leading_symbol < 0xA0)                                                     \
+          RangeScaleFirstCharSection[trailing_symbol][4] += 1 << (8 - code_length);    \
+      }                                                                                \
+      else if (leading_symbol < 0xE0)                                                  \
+        RangeScaleFirstCharSection[trailing_symbol][6] += 1 << (8 - code_length);      \
+    }                                                                                  \
+    else {                                                                             \
+      FreqFirstCharBinary[trailing_symbol][leading_symbol] = 1;                        \
+      RangeScaleFirstChar[0][trailing_symbol] += 1;                                    \
+      if (leading_symbol < 0x80) {                                                     \
+        RangeScaleFirstCharSection[trailing_symbol][3] += 1;                           \
+        if (leading_symbol < 0x40) {                                                   \
+          RangeScaleFirstCharSection[trailing_symbol][1] += 1;                         \
+          if (leading_symbol < 0x20)                                                   \
+            RangeScaleFirstCharSection[trailing_symbol][0] += 1;                       \
+        }                                                                              \
+        else if (leading_symbol < 0x60)                                                \
+          RangeScaleFirstCharSection[trailing_symbol][2] += 1;                         \
+      }                                                                                \
+      else if (leading_symbol < 0xC0) {                                                \
+        RangeScaleFirstCharSection[trailing_symbol][5] += 1;                           \
+        if (leading_symbol < 0xA0)                                                     \
+          RangeScaleFirstCharSection[trailing_symbol][4] += 1;                         \
+      }                                                                                \
+      else if (leading_symbol < 0xE0)                                                  \
+        RangeScaleFirstCharSection[trailing_symbol][6] += 1;                           \
+    }                                                                                  \
+    if (RangeScaleFirstChar[0][trailing_symbol] > FREQ_FIRST_CHAR_BOT)                 \
+      rescaleFirstCharBinary(trailing_symbol);                                         \
+  } \
+}
+#define InitNewLastCharBin(trailing_symbol, leading_symbol, code_length) {       \
+  if (code_length < 8) {                                                         \
+    FreqFirstChar[0][trailing_symbol][leading_symbol] = 1 << (8 - code_length);  \
+    RangeScaleFirstChar[0][trailing_symbol] += 1 << (8 - code_length);           \
+    FreqFirstChar[1][trailing_symbol][leading_symbol] = 1 << (8 - code_length);  \
+    RangeScaleFirstChar[1][trailing_symbol] += 1 << (8 - code_length);           \
+    FreqFirstChar[2][trailing_symbol][leading_symbol] = 1 << (8 - code_length);  \
+    RangeScaleFirstChar[2][trailing_symbol] += 1 << (8 - code_length);           \
+    FreqFirstChar[3][trailing_symbol][leading_symbol] = 1 << (8 - code_length);  \
+    RangeScaleFirstChar[3][trailing_symbol] += 1 << (8 - code_length);           \
+  }                                                                              \
+  else {                                                                         \
+    FreqFirstChar[0][trailing_symbol][leading_symbol] = 1;                       \
+    RangeScaleFirstChar[0][trailing_symbol] += 1;                                \
+    FreqFirstChar[1][trailing_symbol][leading_symbol] = 1;                       \
+    RangeScaleFirstChar[1][trailing_symbol] += 1;                                \
+    FreqFirstChar[2][trailing_symbol][leading_symbol] = 1;                       \
+    RangeScaleFirstChar[2][trailing_symbol] += 1;                                \
+    FreqFirstChar[3][trailing_symbol][leading_symbol] = 1;                       \
+    RangeScaleFirstChar[3][trailing_symbol] += 1;                                \
+  }                                                                              \
+}
+#define InitNewLastCharBinBinary(trailing_symbol, leading_symbol, code_length) {        \
+  if (RangeScaleFirstChar[0][leading_symbol] || (leading_symbol == trailing_symbol)) {  \
+    if (code_length < 8) {                                                              \
+      FreqFirstCharBinary[trailing_symbol][leading_symbol] = 1 << (8 - code_length);    \
+      RangeScaleFirstChar[0][trailing_symbol] += 1 << (8 - code_length);                \
+      if (leading_symbol < 0x80) {                                                      \
+        RangeScaleFirstCharSection[trailing_symbol][3] += 1 << (8 - code_length);       \
+        if (leading_symbol < 0x40) {                                                    \
+          RangeScaleFirstCharSection[trailing_symbol][1] += 1 << (8 - code_length);     \
+          if (leading_symbol < 0x20)                                                    \
+            RangeScaleFirstCharSection[trailing_symbol][0] += 1 << (8 - code_length);   \
+        }                                                                               \
+        else if (leading_symbol < 0x60)                                                 \
+          RangeScaleFirstCharSection[trailing_symbol][2] += 1 << (8 - code_length);     \
+      }                                                                                 \
+      else if (leading_symbol < 0xC0) {                                                 \
+        RangeScaleFirstCharSection[trailing_symbol][5] += 1 << (8 - code_length);       \
+        if (leading_symbol < 0xA0)                                                      \
+          RangeScaleFirstCharSection[trailing_symbol][4] += 1 << (8 - code_length);     \
+      }                                                                                 \
+      else if (leading_symbol < 0xE0)                                                   \
+        RangeScaleFirstCharSection[trailing_symbol][6] += 1 << (8 - code_length);       \
+    }                                                                                   \
+    else {                                                                              \
+      FreqFirstCharBinary[trailing_symbol][leading_symbol] = 1;                         \
+      RangeScaleFirstChar[0][trailing_symbol] += 1;                                     \
+      if (leading_symbol < 0x80) {                                                      \
+        RangeScaleFirstCharSection[trailing_symbol][3] += 1;                            \
+        if (leading_symbol < 0x40) {                                                    \
+          RangeScaleFirstCharSection[trailing_symbol][1] += 1;                          \
+          if (leading_symbol < 0x20)                                                    \
+            RangeScaleFirstCharSection[trailing_symbol][0] += 1;                        \
+        }                                                                               \
+        else if (leading_symbol < 0x60)                                                 \
+          RangeScaleFirstCharSection[trailing_symbol][2] += 1;                          \
+      }                                                                                 \
+      else if (leading_symbol < 0xC0) {                                                 \
+        RangeScaleFirstCharSection[trailing_symbol][5] += 1;                            \
+        if (leading_symbol < 0xA0)                                                      \
+          RangeScaleFirstCharSection[trailing_symbol][4] += 1;                          \
+      }                                                                                 \
+      else if (leading_symbol < 0xE0)                                                   \
+        RangeScaleFirstCharSection[trailing_symbol][6] += 1;                            \
+    }                                                                                   \
+  }                                                                                     \
+}
 #define UpFreqMtfQueueNum(Context) {                                                        \
   FreqMtfQueueNum[Context][mtf_queue_number] += UP_FREQ_MTF_QUEUE_NUM2;                     \
   if ((RangeScaleMtfQueueNum[Context] += UP_FREQ_MTF_QUEUE_NUM2) > FREQ_MTF_QUEUE_NUM_BOT)  \
@@ -343,7 +487,7 @@ FILE * InFile, * OutFile;
 }
 #ifdef encode
 #define WriteByte(Value, File) {                                      \
-  OutBuffer[OutCharNum++] = (unsigned char)(Value);                   \
+  OutBuffer[OutCharNum++] = (U8)(Value);                              \
   if (OutCharNum == BUF_SIZE) {                                       \
     fflush(File);                                                     \
     fwrite(OutBuffer,1,BUF_SIZE,File);                                \
@@ -351,12 +495,12 @@ FILE * InFile, * OutFile;
     OutCharNum = 0;                                                   \
   }                                                                   \
 }
-#define NormalizeEncoder(bot) {                                                                \
-  while ((low ^ (low + range)) < TOP || range < (bot) && ((range = -low & ((bot) - 1)), 1)) {  \
-    WriteByte(low >> 24, OutFile);                                                             \
-    range <<= 8;                                                                               \
-    low <<= 8;                                                                                 \
-  }                                                                                            \
+#define NormalizeEncoder(bot) {                                                                  \
+  while ((low ^ (low + range)) < TOP || (range < (bot) && ((range = -low & ((bot) - 1)), 1))) {  \
+    WriteByte(low >> 24, OutFile);                                                               \
+    range <<= 8;                                                                                 \
+    low <<= 8;                                                                                   \
+  }                                                                                              \
 }
 #define EncodeDictType(Context) {                                                                      \
   NormalizeEncoder(FREQ_SYM_TYPE_BOT);                                                                 \
@@ -423,9 +567,9 @@ FILE * InFile, * OutFile;
 }
 #define EncodeMtfQueuePos(Context) {                                                                         \
   NormalizeEncoder(FREQ_MTF_QUEUE_POS_BOT);                                                                  \
-  unsigned short int RangeScale = RangeScaleMtfQueuePos[Context][mtf_queue_number];                          \
+  U16 RangeScale = RangeScaleMtfQueuePos[Context][mtf_queue_number];                                         \
   if (mtf_queue_size[mtf_queue_number+2] != MTF_QUEUE_SIZE) {                                                \
-    unsigned char tqp = MTF_QUEUE_SIZE - 1;                                                                  \
+    U8 tqp = MTF_QUEUE_SIZE - 1;                                                                             \
     do {                                                                                                     \
       RangeScale -= FreqMtfQueuePos[Context][mtf_queue_number][tqp];                                         \
     } while (tqp-- != mtf_queue_size[mtf_queue_number+2]);                                                   \
@@ -441,7 +585,23 @@ FILE * InFile, * OutFile;
       RangeLow += FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex++];                                  \
     low += RangeLow * (range /= RangeScale);                                                                 \
     range *= FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex];                                         \
-    FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex] += UP_FREQ_MTF_QUEUE_POS;                         \
+    if (FoundIndex >= 4) {                                                                                   \
+      if (FoundIndex == 4) {                                                                                 \
+        FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex] += UP_FREQ_MTF_QUEUE_POS - 1;                 \
+        FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex+1] += 1;                                       \
+      }                                                                                                      \
+      else if (FoundIndex == 63) {                                                                           \
+        FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex-1] += 1;                                       \
+        FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex] += UP_FREQ_MTF_QUEUE_POS - 1;                 \
+      }                                                                                                      \
+      else {                                                                                                 \
+        FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex-1] += 1;                                       \
+        FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex] += UP_FREQ_MTF_QUEUE_POS - 2;                 \
+        FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex+1] += 1;                                       \
+      }                                                                                                      \
+    }                                                                                                        \
+    else                                                                                                     \
+      FreqMtfQueuePos[Context][mtf_queue_number][FoundIndex] += UP_FREQ_MTF_QUEUE_POS;                       \
   }                                                                                                          \
   if ((RangeScaleMtfQueuePos[Context][mtf_queue_number] += UP_FREQ_MTF_QUEUE_POS) > FREQ_MTF_QUEUE_POS_BOT)  \
     rescaleMtfQueuePos(Context, mtf_queue_number);                                                           \
@@ -459,7 +619,23 @@ FILE * InFile, * OutFile;
       RangeLow += FreqMtfgQueuePos[Context][FoundIndex++];                                    \
     low += RangeLow * (range /= RangeScaleMtfgQueuePos[Context]);                             \
     range *= FreqMtfgQueuePos[Context][FoundIndex];                                           \
-    FreqMtfgQueuePos[Context][FoundIndex] += UP_FREQ_MTFG_QUEUE_POS;                          \
+    if (FoundIndex >= 4) {                                                                    \
+      if (FoundIndex == 4) {                                                                  \
+        FreqMtfgQueuePos[Context][FoundIndex] += UP_FREQ_MTFG_QUEUE_POS - 2;                  \
+        FreqMtfgQueuePos[Context][FoundIndex+1] += 2;                                         \
+      }                                                                                       \
+      else if (FoundIndex == 255) {                                                           \
+        FreqMtfgQueuePos[Context][FoundIndex-1] += 2;                                         \
+        FreqMtfgQueuePos[Context][FoundIndex] += UP_FREQ_MTFG_QUEUE_POS - 2;                  \
+      }                                                                                       \
+      else {                                                                                  \
+        FreqMtfgQueuePos[Context][FoundIndex-1] += 2;                                         \
+        FreqMtfgQueuePos[Context][FoundIndex] += UP_FREQ_MTFG_QUEUE_POS - 4;                  \
+        FreqMtfgQueuePos[Context][FoundIndex+1] += 2;                                         \
+      }                                                                                       \
+    }                                                                                         \
+    else                                                                                      \
+      FreqMtfgQueuePos[Context][FoundIndex] += UP_FREQ_MTFG_QUEUE_POS;                        \
   }                                                                                           \
   if ((RangeScaleMtfgQueuePos[Context] += UP_FREQ_MTFG_QUEUE_POS) > FREQ_MTFG_QUEUE_POS_BOT)  \
     rescaleMtfgQueuePos(Context);                                                             \
@@ -532,19 +708,19 @@ FILE * InFile, * OutFile;
       rescaleWordTag();                                             \
 }
 #define EncodeShortDictionarySymbol(Length, CodeBins) {  \
-  NormalizeEncoder(1 << 12);                             \
+  NormalizeEncoder((U32)1 << 12);                        \
   low += BinNum * (range /= DictionaryBins);             \
-  range = CodeBins * (range << (12 - (Length)));         \
+  range = (U32)CodeBins * (range << (12 - (Length)));    \
 }
-#define EncodeLongDictionarySymbol(CodeBins) {   \
-  NormalizeEncoder(1 << 12);                     \
-  low += BinNum * (range /= DictionaryBins);     \
-  NormalizeEncoder(1 << (CodeLength - 12));      \
-  low += BinCode * (range >>= CodeLength - 12);  \
-  range *= CodeBins;                             \
+#define EncodeLongDictionarySymbol(CodeBins) {    \
+  NormalizeEncoder((U32)1 << 12);                 \
+  low += BinNum * (range /= DictionaryBins);      \
+  NormalizeEncoder((U32)1 << (CodeLength - 12));  \
+  low += BinCode * (range >>= CodeLength - 12);   \
+  range *= (U32)CodeBins;                         \
 }
 #define EncodeBaseSymbol(Bits) {         \
-  NormalizeEncoder(1 << Bits);           \
+  NormalizeEncoder((U32)1 << Bits);      \
   low += BaseSymbol * (range >>= Bits);  \
 }
 #define EncodeFirstChar(SymType, LastChar) {                                                                \
@@ -562,7 +738,7 @@ FILE * InFile, * OutFile;
     range *= FreqFirstChar[SymType][LastChar][FoundIndex];                                                  \
     FreqFirstChar[SymType][LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                                     \
     if (FreqFirstChar[SymType][LastChar][FoundIndex] > FreqFirstChar[SymType][LastChar][FoundIndex-1]) {    \
-      unsigned short int SavedFreq = FreqFirstChar[SymType][LastChar][FoundIndex];                          \
+      U16 SavedFreq = FreqFirstChar[SymType][LastChar][FoundIndex];                                         \
       do {                                                                                                  \
         FreqFirstChar[SymType][LastChar][FoundIndex] = FreqFirstChar[SymType][LastChar][FoundIndex-1];      \
         SymbolFirstChar[SymType][LastChar][FoundIndex] = SymbolFirstChar[SymType][LastChar][FoundIndex-1];  \
@@ -676,7 +852,7 @@ FILE * InFile, * OutFile;
   if ((RangeScaleFirstChar[0][LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT)             \
     rescaleFirstCharBinary(LastChar);                                                             \
 }
-void InitEncoder(FILE* EncodedFile, unsigned char num_inst_codes) {
+void InitEncoder(FILE* EncodedFile, U8 num_inst_codes) {
   OutFile = EncodedFile;
   OutCharNum = 0;
   OutBuffer = OutBuffer0;
@@ -690,8 +866,12 @@ void InitEncoder(FILE* EncodedFile, unsigned char num_inst_codes) {
   StartModelINST(num_inst_codes);
   StartModelERG();
   StartModelWordTag();
+if (cap_encoded || UTF8_compliant) {
   StartModelFirstChar();
+}
+else {
   StartModelFirstCharBinary();
+}
 }
 void FinishEncoder() {
   while (low ^ (low + range)) {
@@ -712,13 +892,13 @@ void FinishEncoder() {
     InCharNum = 1;                                \
   }                                               \
 }
-#define NormalizeDecoder(bot) {                                                                \
-  while ((low ^ (low + range)) < TOP || range < (bot) && ((range = -low & ((bot) - 1)), 1)) {  \
-    ReadByte(InFile);                                                                          \
-    code = (code << 8) | Symbol;                                                               \
-    low <<= 8;                                                                                 \
-    range <<= 8;                                                                               \
-  }                                                                                            \
+#define NormalizeDecoder(bot) {                                                                  \
+  while ((low ^ (low + range)) < TOP || (range < (bot) && ((range = -low & ((bot) - 1)), 1))) {  \
+    ReadByte(InFile);                                                                            \
+    code = (code << 8) | Symbol;                                                                 \
+    low <<= 8;                                                                                   \
+    range <<= 8;                                                                                 \
+  }                                                                                              \
 }
 #define DecodeSymTypeStart(Context) {                                        \
   NormalizeDecoder(FREQ_SYM_TYPE_BOT);                                       \
@@ -767,16 +947,16 @@ void FinishEncoder() {
   low += range * (RangeHigh - FreqMtfQueueNum[Context][mtf_queue_number]);    \
   range *= FreqMtfQueueNum[Context][mtf_queue_number];                        \
 }
-#define DecodeMtfQueuePosStart(Context, mtf_queue_number) {                                                  \
-  NormalizeDecoder(FREQ_MTF_QUEUE_POS_BOT);                                                                  \
-  unsigned short int RangeScale = RangeScaleMtfQueuePos[Context][mtf_queue_number];                          \
-  if (mtf_queue_size[mtf_queue_number+2] != MTF_QUEUE_SIZE) {                                                \
-    unsigned char tqp = MTF_QUEUE_SIZE - 1;                                                                  \
-    do {                                                                                                     \
-      RangeScale -= FreqMtfQueuePos[Context][mtf_queue_number][tqp];                                         \
-    } while (tqp-- != mtf_queue_size[mtf_queue_number+2]);                                                   \
-  }                                                                                                          \
-  count = (code - low) / (range /= RangeScale);                                                              \
+#define DecodeMtfQueuePosStart(Context, mtf_queue_number) {           \
+  NormalizeDecoder(FREQ_MTF_QUEUE_POS_BOT);                           \
+  U16 RangeScale = RangeScaleMtfQueuePos[Context][mtf_queue_number];  \
+  if (mtf_queue_size[mtf_queue_number+2] != MTF_QUEUE_SIZE) {         \
+    U8 tqp = MTF_QUEUE_SIZE - 1;                                      \
+    do {                                                              \
+      RangeScale -= FreqMtfQueuePos[Context][mtf_queue_number][tqp];  \
+    } while (tqp-- != mtf_queue_size[mtf_queue_number+2]);            \
+  }                                                                   \
+  count = (code - low) / (range /= RangeScale);                       \
 }
 #define DecodeMtfQueuePosCheck0(Context, mtf_queue_number) ((RangeHigh = FreqMtfQueuePos[Context][mtf_queue_number][0]) > count) 
 #define DecodeMtfQueuePosFinish0(Context, mtf_queue_number) {                                                \
@@ -791,7 +971,23 @@ void FinishEncoder() {
     Symbol++;                                                                                                \
   low += range * (RangeHigh - FreqMtfQueuePos[Context][mtf_queue_number][Symbol]);                           \
   range *= FreqMtfQueuePos[Context][mtf_queue_number][Symbol];                                               \
-  FreqMtfQueuePos[Context][mtf_queue_number][Symbol] += UP_FREQ_MTF_QUEUE_POS;                               \
+  if (Symbol >= 4) {                                                                                         \
+    if (Symbol == 4) {                                                                                       \
+      FreqMtfQueuePos[Context][mtf_queue_number][Symbol] += UP_FREQ_MTF_QUEUE_POS - 1;                       \
+      FreqMtfQueuePos[Context][mtf_queue_number][Symbol+1] += 1;                                             \
+    }                                                                                                        \
+    else if (Symbol == 63) {                                                                                 \
+      FreqMtfQueuePos[Context][mtf_queue_number][Symbol-1] += 1;                                             \
+      FreqMtfQueuePos[Context][mtf_queue_number][Symbol] += UP_FREQ_MTF_QUEUE_POS - 1;                       \
+    }                                                                                                        \
+    else {                                                                                                   \
+      FreqMtfQueuePos[Context][mtf_queue_number][Symbol-1] += 1;                                             \
+      FreqMtfQueuePos[Context][mtf_queue_number][Symbol] += UP_FREQ_MTF_QUEUE_POS - 2;                       \
+      FreqMtfQueuePos[Context][mtf_queue_number][Symbol+1] += 1;                                             \
+    }                                                                                                        \
+  }                                                                                                          \
+  else                                                                                                       \
+    FreqMtfQueuePos[Context][mtf_queue_number][Symbol] += UP_FREQ_MTF_QUEUE_POS;                             \
   if ((RangeScaleMtfQueuePos[Context][mtf_queue_number] += UP_FREQ_MTF_QUEUE_POS) > FREQ_MTF_QUEUE_POS_BOT)  \
     rescaleMtfQueuePos(Context, mtf_queue_number);                                                           \
 }
@@ -813,7 +1009,23 @@ void FinishEncoder() {
     mtfg_queue_position++;                                                                    \
   low += range * (RangeHigh - FreqMtfgQueuePos[Context][mtfg_queue_position]);                \
   range *= FreqMtfgQueuePos[Context][mtfg_queue_position];                                    \
-  FreqMtfgQueuePos[Context][mtfg_queue_position] += UP_FREQ_MTFG_QUEUE_POS;                   \
+  if (mtfg_queue_position >= 4) {                                                             \
+    if (mtfg_queue_position == 4) {                                                           \
+      FreqMtfgQueuePos[Context][mtfg_queue_position] += UP_FREQ_MTFG_QUEUE_POS - 2;           \
+      FreqMtfgQueuePos[Context][mtfg_queue_position+1] += 2;                                  \
+    }                                                                                         \
+    else if (mtfg_queue_position == 255) {                                                    \
+      FreqMtfgQueuePos[Context][mtfg_queue_position-1] += 2;                                  \
+      FreqMtfgQueuePos[Context][mtfg_queue_position] += UP_FREQ_MTFG_QUEUE_POS - 2;           \
+    }                                                                                         \
+    else {                                                                                    \
+      FreqMtfgQueuePos[Context][mtfg_queue_position-1] += 2;                                  \
+      FreqMtfgQueuePos[Context][mtfg_queue_position] += UP_FREQ_MTFG_QUEUE_POS - 4;           \
+      FreqMtfgQueuePos[Context][mtfg_queue_position+1] += 2;                                  \
+    }                                                                                         \
+  }                                                                                           \
+  else                                                                                        \
+    FreqMtfgQueuePos[Context][mtfg_queue_position] += UP_FREQ_MTFG_QUEUE_POS;                 \
   if ((RangeScaleMtfgQueuePos[Context] += UP_FREQ_MTFG_QUEUE_POS) > FREQ_MTFG_QUEUE_POS_BOT)  \
     rescaleMtfgQueuePos(Context);                                                             \
 }
@@ -840,7 +1052,7 @@ void FinishEncoder() {
     rescaleSID(Context);                                       \
 }
 #define DecodeExtraLength() {             \
-  NormalizeDecoder(1 << 2);               \
+  NormalizeDecoder((U32)1 << 2);          \
   Symbol = (code - low) / (range >>= 2);  \
   low += range * Symbol;                  \
 }
@@ -898,31 +1110,31 @@ void FinishEncoder() {
     rescaleWordTag();                                               \
 }
 #define DecodeDictionaryBin(lookup_bits) {                                      \
-  NormalizeDecoder(1 << 12);                                                    \
+  NormalizeDecoder((U32)1 << 12);                                               \
   CodeLength = lookup_bits[BinNum = (code - low) / (range /= DictionaryBins)];  \
-  char BitsUnderBinSize = bin_bits_under_max[FirstChar] - CodeLength;           \
+  S8 BitsUnderBinSize = bin_code_length[FirstChar] - CodeLength;                \
   if (BitsUnderBinSize >= 0)                                                    \
     low += (range <<= BitsUnderBinSize) * (BinNum >> BitsUnderBinSize);         \
   else                                                                          \
     low += range * BinNum;                                                      \
 }
 #define DecodeDictionarySymbolIndex(Bits,FirstBin,SymbolArray) {               \
-  NormalizeDecoder(1 << (Bits));                                               \
+  NormalizeDecoder((U32)1 << (Bits));                                          \
   BinCode = (code - low) / (range >>= (Bits));                                 \
   SymbolIndex = (1 << (Bits)) * (BinNum - FirstBin) + BinCode;                 \
   if (SymbolIndex >= min_extra_reduce_index) {                                 \
     BinCode &= -2;                                                             \
     SymbolIndex = (SymbolIndex + min_extra_reduce_index) >> 1;                 \
     if (CodeLength <= max_regular_code_length) {                               \
-      unsigned int index = SymbolIndex;                                        \
-      unsigned int extra_code_bins = 0;                                        \
+      U32 index = SymbolIndex;                                                 \
+      U32 extra_code_bins = 0;                                                 \
       while (BinCode && (symbol_data[SymbolArray[--index]].type & 8)) {        \
-        char bins = (index >= min_extra_reduce_index) ? 2 : 1;                 \
+        U8 bins = (index >= min_extra_reduce_index) ? 2 : 1;                   \
         extra_code_bins += bins;                                               \
         BinCode -= bins;                                                       \
       }                                                                        \
       low += range * BinCode;                                                  \
-      unsigned int * SymbolArrayPtr = &SymbolArray[SymbolIndex];               \
+      U32 * SymbolArrayPtr = &SymbolArray[SymbolIndex];                        \
       while (symbol_data[*SymbolArrayPtr].type & 8) {                          \
         extra_code_bins += 2;                                                  \
         SymbolArrayPtr++;                                                      \
@@ -938,11 +1150,11 @@ void FinishEncoder() {
   }                                                                            \
   else {                                                                       \
     if (CodeLength <= max_regular_code_length) {                               \
-      unsigned int * SymbolArrayPtr = &SymbolArray[SymbolIndex];               \
-      unsigned int OrigBinCode = BinCode;                                      \
+      U32 * SymbolArrayPtr = &SymbolArray[SymbolIndex];                        \
+      U32 OrigBinCode = BinCode;                                               \
       while (BinCode && (symbol_data[*(--SymbolArrayPtr)].type & 8))           \
         BinCode--;                                                             \
-      unsigned int extra_code_bins = OrigBinCode - BinCode;                    \
+      U32 extra_code_bins = OrigBinCode - BinCode;                             \
       low += range * BinCode;                                                  \
       while (symbol_data[SymbolArray[SymbolIndex]].type & 8)                   \
         extra_code_bins += (++SymbolIndex >= min_extra_reduce_index) ? 2 : 1;  \
@@ -955,9 +1167,10 @@ void FinishEncoder() {
     }                                                                          \
   }                                                                            \
 }
-#define DecodeBaseSymbol(Bits) {                                  \
-  NormalizeDecoder(1 << Bits);                                    \
-  low += range * (BaseSymbol = (code - low) / (range >>= Bits));  \
+#define DecodeBaseSymbol(Bits) {                       \
+  NormalizeDecoder((U32)1 << Bits);                    \
+  range >>= Bits;                                      \
+  low += range * (BaseSymbol = (code - low) / range);  \
 }
 #define DecodeFirstChar(SymType, LastChar) {                                                        \
   NormalizeDecoder(FREQ_FIRST_CHAR_BOT);                                                            \
@@ -968,7 +1181,7 @@ void FinishEncoder() {
     FirstChar = SymbolFirstChar[SymType][LastChar][0];                                              \
   }                                                                                                 \
   else {                                                                                            \
-    unsigned short int * FreqPtr = &FreqFirstChar[SymType][LastChar][1];                            \
+    U16 * FreqPtr = &FreqFirstChar[SymType][LastChar][1];                                           \
     while ((RangeHigh += *FreqPtr) <= count)                                                        \
       FreqPtr++;                                                                                    \
     low += range * (RangeHigh - *FreqPtr);                                                          \
@@ -977,8 +1190,8 @@ void FinishEncoder() {
     FoundIndex = FreqPtr - &FreqFirstChar[SymType][LastChar][0];                                    \
     FirstChar = SymbolFirstChar[SymType][LastChar][FoundIndex];                                     \
     if (*FreqPtr > *(FreqPtr - 1)) {                                                                \
-      unsigned short int SavedFreq = *FreqPtr;                                                      \
-      unsigned char * SymbolPtr = &SymbolFirstChar[SymType][LastChar][FoundIndex];                  \
+      U16 SavedFreq = *FreqPtr;                                                                     \
+      U8 * SymbolPtr = &SymbolFirstChar[SymType][LastChar][FoundIndex];                             \
       do {                                                                                          \
         *FreqPtr = *(FreqPtr - 1);                                                                  \
         FreqPtr--;                                                                                  \
@@ -995,7 +1208,7 @@ void FinishEncoder() {
 #define DecodeFirstCharBinary(LastChar) {                                                \
   NormalizeDecoder(FREQ_FIRST_CHAR_BOT);                                                 \
   count = (code - low) / (range /= RangeScaleFirstChar[0][LastChar]);                    \
-  unsigned short int * FreqPtr;                                                          \
+  U16 * FreqPtr;                                                                         \
   if (RangeScaleFirstCharSection[LastChar][3] > count) {                                 \
     RangeScaleFirstCharSection[LastChar][3] += UP_FREQ_FIRST_CHAR;                       \
     if (RangeScaleFirstCharSection[LastChar][1] > count) {                               \
@@ -1057,7 +1270,7 @@ void FinishEncoder() {
     rescaleFirstCharBinary(LastChar);                                                    \
   }                                                                                      \
 }
-void InitDecoder(FILE* EncodedFile, unsigned char num_inst_codes) {
+void InitDecoder(FILE* EncodedFile, U8 num_inst_codes) {
   InFile = EncodedFile;
   NumInChar = 0, InCharNum = 0, OutCharNum = 0;
   code = 0, range = -1;
@@ -1073,8 +1286,12 @@ void InitDecoder(FILE* EncodedFile, unsigned char num_inst_codes) {
   StartModelINST(num_inst_codes);
   StartModelERG();
   StartModelWordTag();
+if (cap_encoded || UTF8_compliant) {
   StartModelFirstChar();
+}
+else {
   StartModelFirstCharBinary();
+}
 }
 #endif
 
