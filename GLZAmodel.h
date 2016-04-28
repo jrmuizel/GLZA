@@ -37,6 +37,7 @@ unsigned char RangeScaleSymType[4], RangeScaleERG;
 unsigned char FreqSymType[4][4], FreqERG0;
 unsigned short int RangeScaleMtfQueueNum[2], RangeScaleMtfQueuePos[2][19], RangeScaleMtfgQueuePos[2];
 unsigned short int RangeScaleSID[2], RangeScaleINST[2][16], RangeScaleFirstChar[0x100];
+unsigned short int RangeScaleFirstCharSection[0x100][7];
 unsigned short int FreqMtfQueueNum[2][19], FreqMtfQueuePos[2][19][64], FreqMtfgQueuePos[2][256];
 unsigned short int FreqSID[2][16], FreqINST[2][16][41], FreqFirstChar[0x100][0x100];
 unsigned short int DictionaryBins, BinNum;
@@ -144,15 +145,22 @@ FILE * InFile, * OutFile;
   FreqERG0 = 1;            \
   RangeScaleERG = 2;       \
 }
-#define StartModelFirstChar() {      \
-  unsigned char i = 0xFF;            \
-  do {                               \
-    unsigned char j = 0xFF;          \
-    do {                             \
-      FreqFirstChar[i][j] = 0;       \
-    } while (j--);                   \
-    RangeScaleFirstChar[i] = 0;      \
-  } while (i--);                     \
+#define StartModelFirstChar() {            \
+  unsigned char i = 0xFF;                  \
+  do {                                     \
+    unsigned char j = 0xFF;                \
+    do {                                   \
+      FreqFirstChar[i][j] = 0;             \
+    } while (j--);                         \
+    RangeScaleFirstChar[i] = 0;            \
+    RangeScaleFirstCharSection[i][0] = 0;  \
+    RangeScaleFirstCharSection[i][1] = 0;  \
+    RangeScaleFirstCharSection[i][2] = 0;  \
+    RangeScaleFirstCharSection[i][3] = 0;  \
+    RangeScaleFirstCharSection[i][4] = 0;  \
+    RangeScaleFirstCharSection[i][5] = 0;  \
+    RangeScaleFirstCharSection[i][6] = 0;  \
+  } while (i--);                           \
 }
 #define rescaleSymType(Context) {                                                              \
   RangeScaleSymType[Context] = FreqSymType[Context][0] = (FreqSymType[Context][0] + 1) >> 1;   \
@@ -207,6 +215,42 @@ FILE * InFile, * OutFile;
   do {                                                                                                    \
     RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;     \
   } while (i--);                                                                                          \
+}
+#define rescaleFirstCharBinary(Context) {                                                                          \
+  RangeScaleFirstChar[Context] = FreqFirstChar[Context][0] = (FreqFirstChar[Context][0] + 1) >> 1;                 \
+  unsigned char i = 1;                                                                                             \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i != 0x20);                                                                                           \
+  RangeScaleFirstCharSection[Context][0] = RangeScaleFirstChar[Context];                                           \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i != 0x40);                                                                                           \
+  RangeScaleFirstCharSection[Context][1] = RangeScaleFirstChar[Context];                                           \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i != 0x60);                                                                                           \
+  RangeScaleFirstCharSection[Context][2] = RangeScaleFirstChar[Context] - RangeScaleFirstCharSection[Context][1];  \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i != 0x80);                                                                                           \
+  RangeScaleFirstCharSection[Context][3] = RangeScaleFirstChar[Context];                                           \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i != 0xA0);                                                                                           \
+  RangeScaleFirstCharSection[Context][4] = RangeScaleFirstChar[Context] - RangeScaleFirstCharSection[Context][3];  \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i != 0xC0);                                                                                           \
+  RangeScaleFirstCharSection[Context][5] = RangeScaleFirstChar[Context] - RangeScaleFirstCharSection[Context][3];  \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i != 0xE0);                                                                                           \
+  RangeScaleFirstCharSection[Context][6] = RangeScaleFirstChar[Context] - RangeScaleFirstCharSection[Context][5]   \
+      - RangeScaleFirstCharSection[Context][3];                                                                    \
+  do {                                                                                                             \
+    RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
+  } while (++i);                                                                                                   \
 }
 #define ReadByte(File) {                                 \
   if (InCharNum != NumInChar)                            \
@@ -443,6 +487,108 @@ FILE * InFile, * OutFile;
   }                                                                                       \
   if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT)        \
     rescaleFirstChar(LastChar);                                                           \
+}
+#define EncodeFirstCharBinary(LastChar) {                                                \
+  NormalizeEncoder(FREQ_FIRST_CHAR_BOT);                                                 \
+  if (RangeScaleFirstCharSection[LastChar][3] > count) {                                 \
+    RangeScaleFirstCharSection[LastChar][3] += UP_FREQ_FIRST_CHAR;                       \
+    if (RangeScaleFirstCharSection[LastChar][1] > count) {                               \
+      RangeScaleFirstCharSection[LastChar][1] += UP_FREQ_FIRST_CHAR;                     \
+      if (RangeScaleFirstCharSection[LastChar][0] > count) {                             \
+        RangeScaleFirstCharSection[LastChar][0] += UP_FREQ_FIRST_CHAR;                   \
+        if (Symbol == 0) {                                                               \
+          range = FreqFirstChar[LastChar][0] * (range / RangeScaleFirstChar[LastChar]);  \
+          FreqFirstChar[LastChar][0] += UP_FREQ_FIRST_CHAR;                              \
+        }                                                                                \
+        else {                                                                           \
+          RangeLow = FreqFirstChar[LastChar][0];                                         \
+          FoundIndex = 1;                                                                \
+          while (FoundIndex != Symbol)                                                   \
+            RangeLow += FreqFirstChar[LastChar][FoundIndex++];                           \
+          low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                    \
+          range *= FreqFirstChar[LastChar][FoundIndex];                                  \
+          FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                     \
+        }                                                                                \
+      }                                                                                  \
+      else {                                                                             \
+        RangeLow = RangeScaleFirstCharSection[LastChar][0];                              \
+        FoundIndex = 0x20;                                                               \
+        while (FoundIndex != Symbol)                                                     \
+          RangeLow += FreqFirstChar[LastChar][FoundIndex++];                             \
+        low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                      \
+        range *= FreqFirstChar[LastChar][FoundIndex];                                    \
+        FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                       \
+      }                                                                                  \
+    }                                                                                    \
+    else {                                                                               \
+      RangeLow = RangeScaleFirstCharSection[LastChar][1];                                \
+      if (RangeScaleFirstCharSection[LastChar][2] > count) {                             \
+        RangeScaleFirstCharSection[LastChar][2] += UP_FREQ_FIRST_CHAR;                   \
+        FoundIndex = 0x40;                                                               \
+        while (FoundIndex != Symbol)                                                     \
+          RangeLow += FreqFirstChar[LastChar][FoundIndex++];                             \
+        low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                      \
+        range *= FreqFirstChar[LastChar][FoundIndex];                                    \
+        FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                       \
+      }                                                                                  \
+      else {                                                                             \
+        RangeLow += RangeScaleFirstCharSection[LastChar][2];                             \
+        FoundIndex = 0x60;                                                               \
+        while (FoundIndex != Symbol)                                                     \
+          RangeLow += FreqFirstChar[LastChar][FoundIndex++];                             \
+        low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                      \
+        range *= FreqFirstChar[LastChar][FoundIndex];                                    \
+        FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                       \
+      }                                                                                  \
+    }                                                                                    \
+  }                                                                                      \
+  else {                                                                                 \
+    RangeLow = RangeScaleFirstCharSection[LastChar][3];                                  \
+    if (RangeLow + RangeScaleFirstCharSection[LastChar][5] > count) {                    \
+      RangeScaleFirstCharSection[LastChar][5] += UP_FREQ_FIRST_CHAR;                     \
+      if (RangeScaleFirstCharSection[LastChar][4] > count) {                             \
+        RangeScaleFirstCharSection[LastChar][4] += UP_FREQ_FIRST_CHAR;                   \
+        FoundIndex = 0x80;                                                               \
+        while (FoundIndex != Symbol)                                                     \
+          RangeLow += FreqFirstChar[LastChar][FoundIndex++];                             \
+        low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                      \
+        range *= FreqFirstChar[LastChar][FoundIndex];                                    \
+        FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                       \
+      }                                                                                  \
+      else {                                                                             \
+        RangeLow += RangeScaleFirstCharSection[LastChar][4];                             \
+        FoundIndex = 0xA0;                                                               \
+        while (FoundIndex != Symbol)                                                     \
+          RangeLow += FreqFirstChar[LastChar][FoundIndex++];                             \
+        low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                      \
+        range *= FreqFirstChar[LastChar][FoundIndex];                                    \
+        FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                       \
+      }                                                                                  \
+    }                                                                                    \
+    else {                                                                               \
+      RangeLow += RangeScaleFirstCharSection[LastChar][5];                               \
+      if (RangeScaleFirstCharSection[LastChar][6] > count) {                             \
+        RangeScaleFirstCharSection[LastChar][6] += UP_FREQ_FIRST_CHAR;                   \
+        FoundIndex = 0xC0;                                                               \
+        while (FoundIndex != Symbol)                                                     \
+          RangeLow += FreqFirstChar[LastChar][FoundIndex++];                             \
+        low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                      \
+        range *= FreqFirstChar[LastChar][FoundIndex];                                    \
+        FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                       \
+      }                                                                                  \
+      else {                                                                             \
+        RangeLow += RangeScaleFirstCharSection[LastChar][6];                             \
+        FoundIndex = 0xE0;                                                               \
+        while (FoundIndex != Symbol)                                                     \
+          RangeLow += FreqFirstChar[LastChar][FoundIndex++];                             \
+        low += RangeLow * (range /= RangeScaleFirstChar[LastChar]);                      \
+        range *= FreqFirstChar[LastChar][FoundIndex];                                    \
+        FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                       \
+      }                                                                                  \
+    }                                                                                    \
+  }                                                                                      \
+  if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT)       \
+    rescaleFirstCharBinary(LastChar);                                                    \
 }
 void InitEncoder(FILE* EncodedFile) {
   OutFile = EncodedFile;
@@ -694,6 +840,171 @@ void FinishEncoder() {
   }                                                                                       \
   if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT)        \
     rescaleFirstChar(LastChar);                                                           \
+}
+/*
+#define DecodeFirstCharBinary(LastChar) {                                               \
+  NormalizeDecoder(FREQ_FIRST_CHAR_BOT);                                                \
+  count = (code - low) / (range /= RangeScaleFirstChar[LastChar]);                      \
+  if (RangeScaleFirstCharSection[LastChar][3] > count) {                                \
+    RangeScaleFirstCharSection[LastChar][3] += UP_FREQ_FIRST_CHAR;                      \
+    if (RangeScaleFirstCharSection[LastChar][1] > count) {                              \
+      RangeScaleFirstCharSection[LastChar][1] += UP_FREQ_FIRST_CHAR;                    \
+      if (RangeScaleFirstCharSection[LastChar][0] > count) {                            \
+        RangeScaleFirstCharSection[LastChar][0] += UP_FREQ_FIRST_CHAR;                  \
+        if ((RangeHigh = FreqFirstChar[LastChar][0]) > count) {                         \
+          range *= RangeHigh;                                                           \
+          FreqFirstChar[LastChar][0] = RangeHigh + UP_FREQ_FIRST_CHAR;                  \
+          FirstChar = 0;                                                                \
+        }                                                                               \
+        else {                                                                          \
+          unsigned short int * FreqPtr = &FreqFirstChar[LastChar][1];                   \
+          while ((RangeHigh += *FreqPtr) <= count)                                      \
+            FreqPtr++;                                                                  \
+          FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                            \
+          low += range * (RangeHigh - *FreqPtr);                                        \
+          range *= *FreqPtr;                                                            \
+          *FreqPtr += UP_FREQ_FIRST_CHAR;                                               \
+        }                                                                               \
+      }                                                                                 \
+      else {                                                                            \
+        RangeHigh = RangeScaleFirstCharSection[LastChar][0];                            \
+        unsigned short int * FreqPtr = &FreqFirstChar[LastChar][0x20];                  \
+        while ((RangeHigh += *FreqPtr) <= count)                                        \
+          FreqPtr++;                                                                    \
+        FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                              \
+        low += range * (RangeHigh - *FreqPtr);                                          \
+        range *= *FreqPtr;                                                              \
+        *FreqPtr += UP_FREQ_FIRST_CHAR;                                                 \
+      }                                                                                 \
+    }                                                                                   \
+    else {                                                                              \
+      RangeHigh = RangeScaleFirstCharSection[LastChar][1];                              \
+      if (RangeHigh + RangeScaleFirstCharSection[LastChar][2] > count) {                \
+        RangeScaleFirstCharSection[LastChar][2] += UP_FREQ_FIRST_CHAR;                  \
+        unsigned short int * FreqPtr = &FreqFirstChar[LastChar][0x40];                  \
+        while ((RangeHigh += *FreqPtr) <= count)                                        \
+          FreqPtr++;                                                                    \
+        FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                              \
+        low += range * (RangeHigh - *FreqPtr);                                          \
+        range *= *FreqPtr;                                                              \
+        *FreqPtr += UP_FREQ_FIRST_CHAR;                                                 \
+      }                                                                                 \
+      else {                                                                            \
+        RangeHigh += RangeScaleFirstCharSection[LastChar][2];                           \
+        unsigned short int * FreqPtr = &FreqFirstChar[LastChar][0x60];                  \
+        while ((RangeHigh += *FreqPtr) <= count)                                        \
+          FreqPtr++;                                                                    \
+        FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                              \
+        low += range * (RangeHigh - *FreqPtr);                                          \
+        range *= *FreqPtr;                                                              \
+        *FreqPtr += UP_FREQ_FIRST_CHAR;                                                 \
+      }                                                                                 \
+    }                                                                                   \
+    if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT) {  \
+      rescaleFirstCharBinary(LastChar);                                                 \
+    }                                                                                   \
+  }                                                                                     \
+  else {                                                                                \
+    unsigned short int * FreqPtr;                                                       \
+    RangeHigh = RangeScaleFirstCharSection[LastChar][3];                                \
+    if (RangeHigh + RangeScaleFirstCharSection[LastChar][5] > count) {                  \
+      RangeScaleFirstCharSection[LastChar][5] += UP_FREQ_FIRST_CHAR;                    \
+      if (RangeHigh + RangeScaleFirstCharSection[LastChar][4] > count) {                \
+        RangeScaleFirstCharSection[LastChar][4] += UP_FREQ_FIRST_CHAR;                  \
+        FreqPtr = &FreqFirstChar[LastChar][0x80];                                       \
+      }                                                                                 \
+      else {                                                                            \
+        RangeHigh += RangeScaleFirstCharSection[LastChar][4];                           \
+        FreqPtr = &FreqFirstChar[LastChar][0xA0];                                       \
+      }                                                                                 \
+    }                                                                                   \
+    else {                                                                              \
+      RangeHigh += RangeScaleFirstCharSection[LastChar][5];                             \
+      if (RangeHigh + RangeScaleFirstCharSection[LastChar][6] > count) {                \
+        RangeScaleFirstCharSection[LastChar][6] += UP_FREQ_FIRST_CHAR;                  \
+        FreqPtr = &FreqFirstChar[LastChar][0xC0];                                       \
+      }                                                                                 \
+      else {                                                                            \
+        RangeHigh += RangeScaleFirstCharSection[LastChar][6];                           \
+        FreqPtr = &FreqFirstChar[LastChar][0xE0];                                       \
+      }                                                                                 \
+    }                                                                                   \
+    while ((RangeHigh += *FreqPtr) <= count)                                            \
+      FreqPtr++;                                                                        \
+    FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                                  \
+    low += range * (RangeHigh - *FreqPtr);                                              \
+    range *= *FreqPtr;                                                                  \
+    *FreqPtr += UP_FREQ_FIRST_CHAR;                                                     \
+    if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT) {  \
+      rescaleFirstCharBinary(LastChar);                                                 \
+    }                                                                                   \
+  }                                                                                     \
+}
+*/
+#define DecodeFirstCharBinary(LastChar) {                                             \
+  NormalizeDecoder(FREQ_FIRST_CHAR_BOT);                                              \
+  count = (code - low) / (range /= RangeScaleFirstChar[LastChar]);                    \
+  unsigned short int * FreqPtr;                                                       \
+  if (RangeScaleFirstCharSection[LastChar][3] > count) {                              \
+    RangeScaleFirstCharSection[LastChar][3] += UP_FREQ_FIRST_CHAR;                    \
+    if (RangeScaleFirstCharSection[LastChar][1] > count) {                            \
+      RangeScaleFirstCharSection[LastChar][1] += UP_FREQ_FIRST_CHAR;                  \
+      if (RangeScaleFirstCharSection[LastChar][0] > count) {                          \
+        RangeHigh = 0;                                                                \
+        RangeScaleFirstCharSection[LastChar][0] += UP_FREQ_FIRST_CHAR;                \
+        FreqPtr = &FreqFirstChar[LastChar][0];                                        \
+      }                                                                               \
+      else {                                                                          \
+        RangeHigh = RangeScaleFirstCharSection[LastChar][0];                          \
+        FreqPtr = &FreqFirstChar[LastChar][0x20];                                     \
+      }                                                                               \
+    }                                                                                 \
+    else {                                                                            \
+      RangeHigh = RangeScaleFirstCharSection[LastChar][1];                            \
+      if (RangeHigh + RangeScaleFirstCharSection[LastChar][2] > count) {              \
+        RangeScaleFirstCharSection[LastChar][2] += UP_FREQ_FIRST_CHAR;                \
+        FreqPtr = &FreqFirstChar[LastChar][0x40];                                     \
+      }                                                                               \
+      else {                                                                          \
+        RangeHigh += RangeScaleFirstCharSection[LastChar][2];                         \
+        FreqPtr = &FreqFirstChar[LastChar][0x60];                                     \
+      }                                                                               \
+    }                                                                                 \
+  }                                                                                   \
+  else {                                                                              \
+    RangeHigh = RangeScaleFirstCharSection[LastChar][3];                              \
+    if (RangeHigh + RangeScaleFirstCharSection[LastChar][5] > count) {                \
+      RangeScaleFirstCharSection[LastChar][5] += UP_FREQ_FIRST_CHAR;                  \
+      if (RangeHigh + RangeScaleFirstCharSection[LastChar][4] > count) {              \
+        RangeScaleFirstCharSection[LastChar][4] += UP_FREQ_FIRST_CHAR;                \
+        FreqPtr = &FreqFirstChar[LastChar][0x80];                                     \
+      }                                                                               \
+      else {                                                                          \
+        RangeHigh += RangeScaleFirstCharSection[LastChar][4];                         \
+        FreqPtr = &FreqFirstChar[LastChar][0xA0];                                     \
+      }                                                                               \
+    }                                                                                 \
+    else {                                                                            \
+      RangeHigh += RangeScaleFirstCharSection[LastChar][5];                           \
+      if (RangeHigh + RangeScaleFirstCharSection[LastChar][6] > count) {              \
+        RangeScaleFirstCharSection[LastChar][6] += UP_FREQ_FIRST_CHAR;                \
+        FreqPtr = &FreqFirstChar[LastChar][0xC0];                                     \
+      }                                                                               \
+      else {                                                                          \
+        RangeHigh += RangeScaleFirstCharSection[LastChar][6];                         \
+        FreqPtr = &FreqFirstChar[LastChar][0xE0];                                     \
+      }                                                                               \
+    }                                                                                 \
+  }                                                                                   \
+  while ((RangeHigh += *FreqPtr) <= count)                                            \
+    FreqPtr++;                                                                        \
+  FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                                  \
+  low += range * (RangeHigh - *FreqPtr);                                              \
+  range *= *FreqPtr;                                                                  \
+  *FreqPtr += UP_FREQ_FIRST_CHAR;                                                     \
+  if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT) {  \
+    rescaleFirstCharBinary(LastChar);                                                 \
+  }                                                                                   \
 }
 void InitDecoder(FILE* EncodedFile) {
   InFile = EncodedFile;

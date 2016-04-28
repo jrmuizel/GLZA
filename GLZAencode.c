@@ -36,7 +36,7 @@ const unsigned int START_UTF8_3BYTE_SYMBOLS = 0x800;
 const unsigned int START_UTF8_4BYTE_SYMBOLS = 0x10000;
 const unsigned int START_MY_SYMBOLS = 0x00080000;
 const unsigned int READ_SIZE = 16000000;
-const unsigned int MAX_FILE_SYMBOLS = 250000000;
+const unsigned int MAX_FILE_SYMBOLS = 1000000000;
 const unsigned int ESTIMATED_MTF_QUEUE_SPACE = 0x06000000;
 const unsigned int MAX_SYMBOLS_DEFINED = 0x00A00000;
 const unsigned char MAX_BITS_IN_CODE = 25;
@@ -55,7 +55,7 @@ char nbob_shift[0x101];
 unsigned int num_define_symbols_written, num_regular_definitions, num_symbols_to_code, mtf_overflow_symbols_to_code;
 unsigned int max_code_length, max_regular_code_length, mtf_queue_miss_code_space, min_extra_reduce_index;
 unsigned int symbol_code_length, symbol_bits, symbol_index, symbol_to_move, temp_bits, prior_end;
-unsigned int symbol[250000000];
+//unsigned int symbol[380000000];
 unsigned int symbol_count[0x00A00000], orig_symbol_count[0x00A00000], symbol_inst_found[0x00A00000];
 unsigned int symbol_array_index[0x00A00000], sorted_symbols[0x00A00000], *define_symbol_start_ptr[0x00A00000];
 unsigned int mtfg_hits[0x00A00000], mtfg_hits2[0x00A00000];
@@ -70,6 +70,7 @@ unsigned int *mtf_queue_ptr, *mtf_queue_end_ptr;
 unsigned int nsob[0x101][26], nexts[0x101][0x101];
 unsigned int *symbol_ptr, *first_define_ptr = 0;
 unsigned int *sym_list_ptrs[0x101][26];
+unsigned int * symbol;
 unsigned int nbob[0x101][26], sum_nbob[0x101];
 unsigned short int fbob[0x101][26];
 
@@ -982,7 +983,12 @@ void find_last_UTF8(unsigned int string_number) {
 inline void encode_dictionary_symbol(symbol) {
   symbol_index = symbol_array_index[symbol];
   Symbol = starts[symbol];
-  EncodeFirstChar(prior_end);
+  if (UTF8_compliant || cap_encoded) {
+    EncodeFirstChar(prior_end);
+  }
+  else {
+    EncodeFirstCharBinary(prior_end);
+  }
   DictionaryBins = sum_nbob[Symbol];
   if (CodeLength > 12 + nbob_shift[Symbol]) {
     unsigned int max_codes_in_bins, mcib;
@@ -1643,11 +1649,28 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
         if (RangeScaleFirstChar[j1]) {
           unsigned char j2 = 0xFF;
           while (SymbolFirstChar[j1][j2] != BaseSymbol)
-          j2--;
+            j2--;
           FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
           RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
+          if (j2 < 0x80) {
+            RangeScaleFirstCharSection[j1][3] += UP_FREQ_FIRST_CHAR;
+            if (j2 < 0x40) {
+              RangeScaleFirstCharSection[j1][1] += UP_FREQ_FIRST_CHAR;
+              if (j2 < 0x20)
+                RangeScaleFirstCharSection[j1][0] += UP_FREQ_FIRST_CHAR;
+            }
+            else if (j2 < 0x60)
+              RangeScaleFirstCharSection[j1][2] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j2 < 0xC0) {
+            RangeScaleFirstCharSection[j1][5] += UP_FREQ_FIRST_CHAR;
+            if (j2 < 0xA0)
+              RangeScaleFirstCharSection[j1][4] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j2 < 0xE0)
+            RangeScaleFirstCharSection[j1][6] += UP_FREQ_FIRST_CHAR;
           if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
-            rescaleFirstChar(j1);
+            rescaleFirstCharBinary(j1);
         }
       } while (j1--);
       j1 = 0xFF;
@@ -1656,6 +1679,23 @@ void embed_define(unsigned int define_symbol, unsigned char in_definition) {
         if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
           FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
           RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          if (j1 < 0x80) {
+            RangeScaleFirstCharSection[BaseSymbol][3] += UP_FREQ_FIRST_CHAR;
+            if (j1 < 0x40) {
+              RangeScaleFirstCharSection[BaseSymbol][1] += UP_FREQ_FIRST_CHAR;
+              if (j1 < 0x20)
+                RangeScaleFirstCharSection[BaseSymbol][0] += UP_FREQ_FIRST_CHAR;
+            }
+            else if (j1 < 0x60)
+              RangeScaleFirstCharSection[BaseSymbol][2] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j1 < 0xC0) {
+            RangeScaleFirstCharSection[BaseSymbol][5] += UP_FREQ_FIRST_CHAR;
+            if (j1 < 0xA0)
+              RangeScaleFirstCharSection[BaseSymbol][4] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j1 < 0xE0)
+            RangeScaleFirstCharSection[BaseSymbol][6] += UP_FREQ_FIRST_CHAR;
         }
       } while (j1--);
       prior_end = BaseSymbol;
@@ -1889,6 +1929,14 @@ int main(int argc, char* argv[]) {
   fseek(fd_in, 0, SEEK_END);
   in_size = ftell(fd_in);
   rewind(fd_in);
+
+  symbol = 0;
+  if (in_size <= MAX_FILE_SYMBOLS)
+    symbol = malloc(sizeof(unsigned int) * in_size);
+  if (symbol == 0) {
+    fprintf(stderr,"Memory allocation failed\n");
+    exit(0);
+  }
 
   in_char_ptr = in_data;
   end_char_ptr = in_data + in_size;
@@ -2635,7 +2683,12 @@ int main(int argc, char* argv[]) {
   else {
     EncodeDictType(LEVEL0_CAP);
   }
-  EncodeFirstChar(prior_end);
+  if (UTF8_compliant || cap_encoded) {
+    EncodeFirstChar(prior_end);
+  }
+  else {
+    EncodeFirstCharBinary(prior_end);
+  }
   if (max_code_length - nbob_shift[Symbol] > 12) {
     BinCode = 0;
     EncodeLongDictionarySymbol(1);

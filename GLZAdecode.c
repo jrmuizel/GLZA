@@ -1017,8 +1017,25 @@ unsigned char* decode_define(unsigned char* define_string) {
             j2--;
           FreqFirstChar[j1][j2] = UP_FREQ_FIRST_CHAR;
           RangeScaleFirstChar[j1] += UP_FREQ_FIRST_CHAR;
+          if (j2 < 0x80) {
+            RangeScaleFirstCharSection[j1][3] += UP_FREQ_FIRST_CHAR;
+            if (j2 < 0x40) {
+              RangeScaleFirstCharSection[j1][1] += UP_FREQ_FIRST_CHAR;
+              if (j2 < 0x20)
+                RangeScaleFirstCharSection[j1][0] += UP_FREQ_FIRST_CHAR;
+            }
+            else if (j2 < 0x60)
+              RangeScaleFirstCharSection[j1][2] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j2 < 0xC0) {
+            RangeScaleFirstCharSection[j1][5] += UP_FREQ_FIRST_CHAR;
+            if (j2 < 0xA0)
+              RangeScaleFirstCharSection[j1][4] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j2 < 0xE0)
+            RangeScaleFirstCharSection[j1][6] += UP_FREQ_FIRST_CHAR;
           if (RangeScaleFirstChar[j1] > FREQ_FIRST_CHAR_BOT)
-            rescaleFirstChar(j1);
+            rescaleFirstCharBinary(j1);
         }
       } while (j1--);
       j1 = 0xFF;
@@ -1027,6 +1044,23 @@ unsigned char* decode_define(unsigned char* define_string) {
         if (RangeScaleFirstChar[j1] || (j1 == BaseSymbol)) {
           FreqFirstChar[BaseSymbol][j1] = UP_FREQ_FIRST_CHAR;
           RangeScaleFirstChar[BaseSymbol] += UP_FREQ_FIRST_CHAR;
+          if (j1 < 0x80) {
+            RangeScaleFirstCharSection[BaseSymbol][3] += UP_FREQ_FIRST_CHAR;
+            if (j1 < 0x40) {
+              RangeScaleFirstCharSection[BaseSymbol][1] += UP_FREQ_FIRST_CHAR;
+              if (j1 < 0x20)
+                RangeScaleFirstCharSection[BaseSymbol][0] += UP_FREQ_FIRST_CHAR;
+            }
+            else if (j1 < 0x60)
+              RangeScaleFirstCharSection[BaseSymbol][2] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j1 < 0xC0) {
+            RangeScaleFirstCharSection[BaseSymbol][5] += UP_FREQ_FIRST_CHAR;
+            if (j1 < 0xA0)
+              RangeScaleFirstCharSection[BaseSymbol][4] += UP_FREQ_FIRST_CHAR;
+          }
+          else if (j1 < 0xE0)
+            RangeScaleFirstCharSection[BaseSymbol][6] += UP_FREQ_FIRST_CHAR;
         }
       } while (j1--);
     }
@@ -1117,7 +1151,13 @@ unsigned char* decode_define(unsigned char* define_string) {
           }
         }
         else {
+if (UTF8_compliant) {
           DecodeFirstChar(prior_end);
+}
+else {
+          DecodeFirstCharBinary(prior_end);
+}
+
           DictionaryBins = sum_nbob[FirstChar];
           DecodeDictionaryBin(lookup_bits[FirstChar]);
           if (CodeLength > 12 + nbob_shift[FirstChar]) {
@@ -1824,6 +1864,7 @@ void *write_output_thread(void *arg) {
 #define send_symbol() { \
   out_symbol_array[out_symbol_count++] = symbol_number; \
   manage_io(); \
+  prior_end = ends[symbol_number]; \
 }
 
 
@@ -1996,7 +2037,6 @@ int main(int argc, char* argv[]) {
               break; // EOF
           }
           send_symbol_cap();
-          prior_end = ends[symbol_number];
           if (symbol_instances[symbol_number] <= 20) {
             if (use_mtf) {
               insert_mtf_queue(NOT_CAP);
@@ -2017,12 +2057,10 @@ int main(int argc, char* argv[]) {
         else if (Symbol == 2) {
           get_mtfg_symbol();
           send_symbol_cap();
-          prior_end = ends[symbol_number];
         }
         else {
           get_mtf_symbol();
           send_symbol_cap();
-          prior_end = ends[symbol_number];
         }
       }
       else { // prior_is_cap
@@ -2040,7 +2078,6 @@ int main(int argc, char* argv[]) {
               break; // EOF
           }
           send_symbol_cap();
-          prior_end = ends[symbol_number];
           if (symbol_instances[symbol_number] <= 20) {
             if (use_mtf) {
               insert_mtf_queue(CAP);
@@ -2061,12 +2098,10 @@ int main(int argc, char* argv[]) {
         else if (Symbol == 2) {
           get_mtfg_symbol_cap();
           send_symbol_cap();
-          prior_end = ends[symbol_number];
         }
         else {
           get_mtf_symbol_cap();
           send_symbol_cap();
-          prior_end = ends[symbol_number];
         }
       }
     }
@@ -2075,7 +2110,12 @@ int main(int argc, char* argv[]) {
     while (1) {
       DecodeSymType(LEVEL0);
       if (Symbol == 0) {
-        DecodeFirstChar(prior_end);
+if (UTF8_compliant) {
+          DecodeFirstChar(prior_end);
+}
+else {
+          DecodeFirstCharBinary(prior_end);
+}
         DictionaryBins = sum_nbob[FirstChar];
         DecodeDictionaryBin(lookup_bits[FirstChar]);
         if (CodeLength > 12 + nbob_shift[FirstChar]) {
@@ -2087,7 +2127,6 @@ int main(int argc, char* argv[]) {
             break; // EOF
         }
         send_symbol();
-        prior_end = ends[symbol_number];
         if (symbol_instances[symbol_number] <= 20) {
           if (use_mtf) {
             insert_mtf_queue(NOT_CAP);
@@ -2108,12 +2147,10 @@ int main(int argc, char* argv[]) {
       else if (Symbol == 2) {
         get_mtfg_symbol();
         send_symbol();
-        prior_end = ends[symbol_number];
       }
       else {
         get_mtf_symbol();
         send_symbol();
-        prior_end = ends[symbol_number];
       }
     }
   }
