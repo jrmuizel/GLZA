@@ -31,7 +31,7 @@ enum { LEVEL0 = 0, LEVEL0_CAP = 1, LEVEL1 = 2, LEVEL1_CAP = 3 };
 unsigned int NumInChar, InCharNum, OutCharNum;
 unsigned int RangeLow, RangeHigh, count, BaseSymbol, SymbolIndex, BinCode, FirstChar, SymbolFirstChar[0x100][0x100];
 unsigned int low, code, range;
-unsigned char InData[BUF_SIZE], OutData[BUF_SIZE];
+unsigned char InBuffer[BUF_SIZE], OutBuffer0[BUF_SIZE], OutBuffer1[BUF_SIZE], OutBufferNum, *OutBuffer;
 unsigned char Symbol, SIDSymbol, FoundIndex, mtfg_queue_position, mtf_queue_number, Instances, CodeLength;
 unsigned char RangeScaleSymType[4], RangeScaleERG;
 unsigned char FreqSymType[4][4], FreqERG0;
@@ -252,23 +252,23 @@ FILE * InFile, * OutFile;
     RangeScaleFirstChar[Context] += FreqFirstChar[Context][i] = (FreqFirstChar[Context][i] + 1) >> 1;              \
   } while (++i);                                                                                                   \
 }
-#define ReadByte(File) {                                 \
-  if (InCharNum != NumInChar)                            \
-    Symbol = InData[InCharNum++];                        \
-  else if (NumInChar = fread(InData,1,BUF_SIZE,File)) {  \
-    Symbol = InData[0];                                  \
-    InCharNum = 1;                                       \
-  }                                                      \
-  else                                                   \
-    Symbol = -1;                                         \
+#define ReadByte(File) {                          \
+  if (InCharNum != NumInChar)                     \
+    Symbol = InBuffer[InCharNum++];               \
+  else {                                          \
+    NumInChar = fread(InBuffer,1,BUF_SIZE,File);  \
+    Symbol = InBuffer[0];                         \
+    InCharNum = 1;                                \
+  }                                               \
 }
-#define WriteByte(Value, File) {                   \
-  OutData[OutCharNum++] = (unsigned char)(Value);  \
-  if (OutCharNum == BUF_SIZE) {                    \
-    fflush(File);                                  \
-    fwrite(OutData,1,BUF_SIZE,File);               \
-    OutCharNum = 0;                                \
-  }                                                \
+#define WriteByte(Value, File) {                                      \
+  OutBuffer[OutCharNum++] = (unsigned char)(Value);                   \
+  if (OutCharNum == BUF_SIZE) {                                       \
+    fflush(File);                                                     \
+    fwrite(OutBuffer,1,BUF_SIZE,File);                                \
+    OutBuffer = (OutBuffer == OutBuffer0) ? OutBuffer1 : OutBuffer0;  \
+    OutCharNum = 0;                                                   \
+  }                                                                   \
 }
 #define NormalizeEncoder(bot) {                                                                \
   while ((low ^ (low + range)) < TOP || range < (bot) && ((range = -low & ((bot) - 1)), 1)) {  \
@@ -593,6 +593,8 @@ FILE * InFile, * OutFile;
 void InitEncoder(FILE* EncodedFile) {
   OutFile = EncodedFile;
   OutCharNum = 0;
+  OutBuffer = OutBuffer0;
+  OutBufferNum = 0;
   low = 0, range = -1;
   if (use_mtf) {
     StartModelSymType();
@@ -614,7 +616,7 @@ void FinishEncoder() {
     low <<= 8;
     range <<= 8;
   }
-  fwrite(OutData,1,OutCharNum,OutFile);
+  fwrite(OutBuffer,1,OutCharNum,OutFile);
 }
 #define NormalizeDecoder(bot) {                                                                \
   while ((low ^ (low + range)) < TOP || range < (bot) && ((range = -low & ((bot) - 1)), 1)) {  \
@@ -626,7 +628,7 @@ void FinishEncoder() {
 }
 #define DecodeSymType(Context) {                                                       \
   NormalizeDecoder(FREQ_SYM_TYPE_BOT);                                                 \
-  count = (code - low) / (range /= RangeScaleSymType[Context]);                        \
+  unsigned int count = (code - low) / (range /= RangeScaleSymType[Context]);           \
   if (FreqSymType[Context][0] > count) {                                               \
     range *= FreqSymType[Context][0];                                                  \
     FreqSymType[Context][0] += UP_FREQ_SYM_TYPE;                                       \
@@ -774,39 +776,54 @@ void FinishEncoder() {
   else                                                                          \
     low += range * BinNum;                                                      \
 }
-#define DecodeDictionarySymbolIndex(Bits,FirstBin,SymbolArray) {             \
-  NormalizeDecoder(1 << Bits);                                               \
-  BinCode = (code - low) / (range >>= Bits);                                 \
-  SymbolIndex = (1 << Bits) * (BinNum - FirstBin) + BinCode;                 \
-  if (SymbolIndex >= min_extra_reduce_index) {                               \
-    BinCode &= -2;                                                           \
-    SymbolIndex = (SymbolIndex + min_extra_reduce_index) >> 1;               \
-    unsigned int index = SymbolIndex;                                        \
-    unsigned int extra_code_bins = 0;                                        \
-    while (BinCode && (symbol_type[SymbolArray[--index]] & 8)) {             \
-      char bins = (index >= min_extra_reduce_index) ? 2 : 1;                 \
-      BinCode -= bins;                                                       \
-      extra_code_bins += bins;                                               \
-    }                                                                        \
-    low += range * BinCode;                                                  \
-    while (symbol_type[SymbolArray[SymbolIndex]] & 8) {                      \
-      SymbolIndex++;                                                         \
-      extra_code_bins += 2;                                                  \
-    }                                                                        \
-    range *= 2 + extra_code_bins;                                            \
-  }                                                                          \
-  else {                                                                     \
-    unsigned int index = SymbolIndex;                                        \
-    unsigned int extra_code_bins = 0;                                        \
-    while (BinCode && (symbol_type[SymbolArray[--index]] & 8)) {             \
-      BinCode--;                                                             \
-      extra_code_bins++;                                                     \
-    }                                                                        \
-    low += range * BinCode;                                                  \
-    while (symbol_type[SymbolArray[SymbolIndex]] & 8)                        \
-      extra_code_bins += (++SymbolIndex >= min_extra_reduce_index) ? 2 : 1;  \
-    range *= 1 + extra_code_bins;                                            \
-  }                                                                          \
+#define DecodeDictionarySymbolIndex(Bits,FirstBin,SymbolArray) {               \
+  NormalizeDecoder(1 << (Bits));                                               \
+  BinCode = (code - low) / (range >>= (Bits));                                 \
+  SymbolIndex = (1 << (Bits)) * (BinNum - FirstBin) + BinCode;                 \
+  if (SymbolIndex >= min_extra_reduce_index) {                                 \
+    BinCode &= -2;                                                             \
+    SymbolIndex = (SymbolIndex + min_extra_reduce_index) >> 1;                 \
+    if (CodeLength <= max_regular_code_length) {                               \
+      unsigned int index = SymbolIndex;                                        \
+      unsigned int extra_code_bins = 0;                                        \
+      while (BinCode && (symbol_type[SymbolArray[--index]] & 8)) {             \
+        char bins = (index >= min_extra_reduce_index) ? 2 : 1;                 \
+        extra_code_bins += bins;                                               \
+        BinCode -= bins;                                                       \
+      }                                                                        \
+      low += range * BinCode;                                                  \
+      unsigned int * SymbolArrayPtr = &SymbolArray[SymbolIndex];               \
+      while (symbol_type[*SymbolArrayPtr] & 8) {                               \
+        extra_code_bins += 2;                                                  \
+        SymbolArrayPtr++;                                                      \
+      }                                                                        \
+      range *= 2 + extra_code_bins;                                            \
+      symbol_number = *SymbolArrayPtr;                                         \
+    }                                                                          \
+    else {                                                                     \
+      low += range * BinCode;                                                  \
+      range <<= 1;                                                             \
+      symbol_number = SymbolArray[SymbolIndex];                                \
+    }                                                                          \
+  }                                                                            \
+  else {                                                                       \
+    if (CodeLength <= max_regular_code_length) {                               \
+      unsigned int * SymbolArrayPtr = &SymbolArray[SymbolIndex];               \
+      unsigned int OrigBinCode = BinCode;                                      \
+      while (BinCode && (symbol_type[*(--SymbolArrayPtr)] & 8))                \
+        BinCode--;                                                             \
+      unsigned int extra_code_bins = OrigBinCode - BinCode;                    \
+      low += range * BinCode;                                                  \
+      while (symbol_type[SymbolArray[SymbolIndex]] & 8)                        \
+        extra_code_bins += (++SymbolIndex >= min_extra_reduce_index) ? 2 : 1;  \
+      range *= 1 + extra_code_bins;                                            \
+      symbol_number = SymbolArray[SymbolIndex];                                \
+    }                                                                          \
+    else {                                                                     \
+      low += range * BinCode;                                                  \
+      symbol_number = SymbolArray[SymbolIndex];                                \
+    }                                                                          \
+  }                                                                            \
 }
 #define DecodeBaseSymbol(Bits) {                                  \
   NormalizeDecoder(1 << Bits);                                    \
@@ -821,15 +838,17 @@ void FinishEncoder() {
     FirstChar = SymbolFirstChar[LastChar][0];                                             \
   }                                                                                       \
   else {                                                                                  \
+    unsigned short int * FreqPtr = &FreqFirstChar[LastChar][1];                           \
     FoundIndex = 1;                                                                       \
-    while ((RangeHigh += FreqFirstChar[LastChar][FoundIndex]) <= count)                   \
-      FoundIndex++;                                                                       \
-    low += range * (RangeHigh - FreqFirstChar[LastChar][FoundIndex]);                     \
-    range *= FreqFirstChar[LastChar][FoundIndex];                                         \
-    FreqFirstChar[LastChar][FoundIndex] += UP_FREQ_FIRST_CHAR;                            \
+    while ((RangeHigh += *FreqPtr) <= count)                                              \
+      FreqPtr++;                                                                          \
+    FoundIndex = FreqPtr - &FreqFirstChar[LastChar][0];                                   \
+    low += range * (RangeHigh - *FreqPtr);                                                \
+    range *= *FreqPtr;                                                                    \
+    *FreqPtr += UP_FREQ_FIRST_CHAR;                                                       \
     FirstChar = SymbolFirstChar[LastChar][FoundIndex];                                    \
-    if (FreqFirstChar[LastChar][FoundIndex] > FreqFirstChar[LastChar][FoundIndex-1]) {    \
-      unsigned short int SavedFreq = FreqFirstChar[LastChar][FoundIndex];                 \
+    if (*FreqPtr > *(FreqPtr - 1)) {                                                      \
+      unsigned short int SavedFreq = *FreqPtr;                                            \
       do {                                                                                \
         FreqFirstChar[LastChar][FoundIndex] = FreqFirstChar[LastChar][FoundIndex-1];      \
         SymbolFirstChar[LastChar][FoundIndex] = SymbolFirstChar[LastChar][FoundIndex-1];  \
@@ -841,106 +860,6 @@ void FinishEncoder() {
   if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT)        \
     rescaleFirstChar(LastChar);                                                           \
 }
-/*
-#define DecodeFirstCharBinary(LastChar) {                                               \
-  NormalizeDecoder(FREQ_FIRST_CHAR_BOT);                                                \
-  count = (code - low) / (range /= RangeScaleFirstChar[LastChar]);                      \
-  if (RangeScaleFirstCharSection[LastChar][3] > count) {                                \
-    RangeScaleFirstCharSection[LastChar][3] += UP_FREQ_FIRST_CHAR;                      \
-    if (RangeScaleFirstCharSection[LastChar][1] > count) {                              \
-      RangeScaleFirstCharSection[LastChar][1] += UP_FREQ_FIRST_CHAR;                    \
-      if (RangeScaleFirstCharSection[LastChar][0] > count) {                            \
-        RangeScaleFirstCharSection[LastChar][0] += UP_FREQ_FIRST_CHAR;                  \
-        if ((RangeHigh = FreqFirstChar[LastChar][0]) > count) {                         \
-          range *= RangeHigh;                                                           \
-          FreqFirstChar[LastChar][0] = RangeHigh + UP_FREQ_FIRST_CHAR;                  \
-          FirstChar = 0;                                                                \
-        }                                                                               \
-        else {                                                                          \
-          unsigned short int * FreqPtr = &FreqFirstChar[LastChar][1];                   \
-          while ((RangeHigh += *FreqPtr) <= count)                                      \
-            FreqPtr++;                                                                  \
-          FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                            \
-          low += range * (RangeHigh - *FreqPtr);                                        \
-          range *= *FreqPtr;                                                            \
-          *FreqPtr += UP_FREQ_FIRST_CHAR;                                               \
-        }                                                                               \
-      }                                                                                 \
-      else {                                                                            \
-        RangeHigh = RangeScaleFirstCharSection[LastChar][0];                            \
-        unsigned short int * FreqPtr = &FreqFirstChar[LastChar][0x20];                  \
-        while ((RangeHigh += *FreqPtr) <= count)                                        \
-          FreqPtr++;                                                                    \
-        FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                              \
-        low += range * (RangeHigh - *FreqPtr);                                          \
-        range *= *FreqPtr;                                                              \
-        *FreqPtr += UP_FREQ_FIRST_CHAR;                                                 \
-      }                                                                                 \
-    }                                                                                   \
-    else {                                                                              \
-      RangeHigh = RangeScaleFirstCharSection[LastChar][1];                              \
-      if (RangeHigh + RangeScaleFirstCharSection[LastChar][2] > count) {                \
-        RangeScaleFirstCharSection[LastChar][2] += UP_FREQ_FIRST_CHAR;                  \
-        unsigned short int * FreqPtr = &FreqFirstChar[LastChar][0x40];                  \
-        while ((RangeHigh += *FreqPtr) <= count)                                        \
-          FreqPtr++;                                                                    \
-        FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                              \
-        low += range * (RangeHigh - *FreqPtr);                                          \
-        range *= *FreqPtr;                                                              \
-        *FreqPtr += UP_FREQ_FIRST_CHAR;                                                 \
-      }                                                                                 \
-      else {                                                                            \
-        RangeHigh += RangeScaleFirstCharSection[LastChar][2];                           \
-        unsigned short int * FreqPtr = &FreqFirstChar[LastChar][0x60];                  \
-        while ((RangeHigh += *FreqPtr) <= count)                                        \
-          FreqPtr++;                                                                    \
-        FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                              \
-        low += range * (RangeHigh - *FreqPtr);                                          \
-        range *= *FreqPtr;                                                              \
-        *FreqPtr += UP_FREQ_FIRST_CHAR;                                                 \
-      }                                                                                 \
-    }                                                                                   \
-    if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT) {  \
-      rescaleFirstCharBinary(LastChar);                                                 \
-    }                                                                                   \
-  }                                                                                     \
-  else {                                                                                \
-    unsigned short int * FreqPtr;                                                       \
-    RangeHigh = RangeScaleFirstCharSection[LastChar][3];                                \
-    if (RangeHigh + RangeScaleFirstCharSection[LastChar][5] > count) {                  \
-      RangeScaleFirstCharSection[LastChar][5] += UP_FREQ_FIRST_CHAR;                    \
-      if (RangeHigh + RangeScaleFirstCharSection[LastChar][4] > count) {                \
-        RangeScaleFirstCharSection[LastChar][4] += UP_FREQ_FIRST_CHAR;                  \
-        FreqPtr = &FreqFirstChar[LastChar][0x80];                                       \
-      }                                                                                 \
-      else {                                                                            \
-        RangeHigh += RangeScaleFirstCharSection[LastChar][4];                           \
-        FreqPtr = &FreqFirstChar[LastChar][0xA0];                                       \
-      }                                                                                 \
-    }                                                                                   \
-    else {                                                                              \
-      RangeHigh += RangeScaleFirstCharSection[LastChar][5];                             \
-      if (RangeHigh + RangeScaleFirstCharSection[LastChar][6] > count) {                \
-        RangeScaleFirstCharSection[LastChar][6] += UP_FREQ_FIRST_CHAR;                  \
-        FreqPtr = &FreqFirstChar[LastChar][0xC0];                                       \
-      }                                                                                 \
-      else {                                                                            \
-        RangeHigh += RangeScaleFirstCharSection[LastChar][6];                           \
-        FreqPtr = &FreqFirstChar[LastChar][0xE0];                                       \
-      }                                                                                 \
-    }                                                                                   \
-    while ((RangeHigh += *FreqPtr) <= count)                                            \
-      FreqPtr++;                                                                        \
-    FirstChar = FreqPtr - &FreqFirstChar[LastChar][0];                                  \
-    low += range * (RangeHigh - *FreqPtr);                                              \
-    range *= *FreqPtr;                                                                  \
-    *FreqPtr += UP_FREQ_FIRST_CHAR;                                                     \
-    if ((RangeScaleFirstChar[LastChar] += UP_FREQ_FIRST_CHAR) > FREQ_FIRST_CHAR_BOT) {  \
-      rescaleFirstCharBinary(LastChar);                                                 \
-    }                                                                                   \
-  }                                                                                     \
-}
-*/
 #define DecodeFirstCharBinary(LastChar) {                                             \
   NormalizeDecoder(FREQ_FIRST_CHAR_BOT);                                              \
   count = (code - low) / (range /= RangeScaleFirstChar[LastChar]);                    \

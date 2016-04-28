@@ -1245,7 +1245,7 @@ inline void manage_mtf_queue(unsigned int this_symbol, unsigned int symbol_inst,
     else {
       symbol_is_nonergodic[mtf_queue[this_symbol_count][0]] = 0;
       symbol_to_move = mtf_queue[this_symbol_count][0];
-      remove_dictionary_symbol(this_symbol, symbol_bits); \
+      remove_dictionary_symbol(this_symbol, symbol_bits);
       add_dictionary_symbol(symbol_to_move,symbol_bits);
       // move the queue elements down
       while (i1 < mtf_queue_size[this_symbol_count] - 1) {
@@ -2572,20 +2572,20 @@ int main(int argc, char* argv[]) {
   prior_is_cap = 0;
 
   InitEncoder(fd_out);
-  OutData[OutCharNum++] = (cap_encoded << 7) | (UTF8_compliant << 6) | (use_mtf << 5) | base_bits;
+  OutBuffer[OutCharNum++] = (cap_encoded << 7) | (UTF8_compliant << 6) | (use_mtf << 5) | base_bits;
   if (delta_gap < 4)
-    OutData[OutCharNum++] = mtf_queue_overflow_code_length[2] - 1 + (delta_gap << 5);
+    OutBuffer[OutCharNum++] = mtf_queue_overflow_code_length[2] - 1 + (delta_gap << 5);
   else
-    OutData[OutCharNum++] = mtf_queue_overflow_code_length[2] - 1 + (3 << 5);
-  OutData[OutCharNum++] = ((mtf_queue_overflow_code_length[3] != mtf_queue_overflow_code_length[2]) << 7)
+    OutBuffer[OutCharNum++] = mtf_queue_overflow_code_length[2] - 1 + (3 << 5);
+  OutBuffer[OutCharNum++] = ((mtf_queue_overflow_code_length[3] != mtf_queue_overflow_code_length[2]) << 7)
       | ((mtf_queue_overflow_code_length[4] != mtf_queue_overflow_code_length[3]) << 6)
       | (max_regular_code_length - 1);
   for (i1 = 0 ; i1 <= 7 ; i1++)
     this_char = (this_char << 1) | (mtf_queue_overflow_code_length[i1 + 5] != mtf_queue_overflow_code_length[i1 + 4]);
-  OutData[OutCharNum++] = this_char;
+  OutBuffer[OutCharNum++] = this_char;
   for (i1 = 0 ; i1 <= 7 ; i1++)
     this_char = (this_char << 1) | (mtf_queue_overflow_code_length[i1 + 13] != mtf_queue_overflow_code_length[i1 + 12]);
-  OutData[OutCharNum++] = this_char;
+  OutBuffer[OutCharNum++] = this_char;
 
   if (UTF8_compliant) {
     for (i1 = 0 ; i1 < end_symbols ; i1++) {

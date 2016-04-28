@@ -35,29 +35,29 @@ const unsigned int START_UTF8_4BYTE_symbols = 0x10000;
 const unsigned int MAX_INSTANCES_FOR_MTF_QUEUE = 20;
 const unsigned int MTF_QUEUE_SIZE = 64;
 const unsigned int CHARS_TO_WRITE = 1000000;
-const unsigned int MAX_SYMBOLS_DEFINED = 0x00A00000;
+const unsigned int MAX_SYMBOLS_DEFINED = 0x00C00000;
 const unsigned int INITIAL_LIST_SIZE = 0x800;
 const unsigned int BIG_LIST_SIZE = 0x400000;
 
 unsigned char out_char0[12000000], out_char1[12000000];
 unsigned char mtf_queue_miss_code_length[21], mtf_queue_offset[21];
-unsigned char symbol_strings[300000000], new_symbol_string[0x00A00000];
-unsigned char symbol_type[0xA00000];  // bit 0: string ends CAP_CHAR, bit1: string starts a-z, bit2: nonergodic. bit3: in queue
+unsigned char symbol_strings[500000000], new_symbol_string[0x00C00000];
+unsigned char symbol_type[0x00C00000];  // bit 0: string ends CAP_CHAR, bit1: string starts a-z, bit2: nonergodic. bit3: in queue
 unsigned char lookup_bits[0x101][0x1000];
 unsigned char symbol_count, num_threads, max_code_length, max_regular_code_length, found_first_symbol, end_symbol;
 unsigned char UTF8_compliant, base_bits, cap_encoded, use_mtf, caps_on, prior_is_cap, write_caps_on, delta_gap, delta_on;
 unsigned char out_buffer_num;
 unsigned char *symbol_string_ptr, *next_string_ptr, *next_symbol_string_ptr, *out_char_ptr, *start_char_ptr, *extra_out_char_ptr;
-unsigned char symbols_remaining[0x00A00000], symbol_instances[0x00A00000];
-unsigned char starts[0x00A00000], ends[0x00A00000];
+unsigned char symbols_remaining[0x00C00000], symbol_instances[0x00C00000];
+unsigned char starts[0x00C00000], ends[0x00C00000];
 unsigned char big_sym_list[0x101][26];
 char nbob_shift[0x101];
-unsigned int symbol_string_indexes[0x00A00000];
+unsigned int symbol_string_indexes[0x00C00000];
 unsigned int i1, i2, num_symbols_defined, symbol, symbol_number, out_symbol_count, temp_bits;
 unsigned int out_chars, out_buffers_sent, chars_to_write, num_az, symbol_index, symbol_to_move, prior_end;
 unsigned int max_code_length_symbols_per_bin, min_extra_reduce_index;
 unsigned int nsob[0x101][26], nbob[0x101][26], sum_nbob[0x101];
-unsigned int symbol_array_index[0x00A00000];
+unsigned int symbol_array_index[0x00C00000];
 unsigned int mtf_queue[21][64], mtf_queue_size[21];
 unsigned int mtfg_queue_0[8], mtfg_queue_0_offset;
 unsigned int mtfg_queue_8[8], mtfg_queue_8_offset;
@@ -656,16 +656,15 @@ FILE *fd_in, *fd_out;
   if (index_bits > reduce_bits) { \
     min_extra_reduce_index = (nsob[FirstChar][CodeLength] << 1) - (msib >> reduce_bits); \
     DecodeDictionarySymbolIndex(index_bits-reduce_bits,fbob[FirstChar][CodeLength],sym_list_ptrs[FirstChar][CodeLength]); \
-    symbol_number = sym_list_ptrs[FirstChar][CodeLength][SymbolIndex]; \
   } \
   else { \
     SymbolIndex = BinNum - fbob[FirstChar][CodeLength]; \
     unsigned int extra_code_bins = 0; \
-    int index = SymbolIndex; \
-    if (index > 0) { \
+    if (SymbolIndex) { \
+      int index = SymbolIndex; \
       if (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--index]] & 8) { \
         extra_code_bins++; \
-        while ((index > 0) && (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--index]] & 8)) \
+        while (index && (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--index]] & 8)) \
           extra_code_bins++; \
       } \
     } \
@@ -687,7 +686,7 @@ FILE *fd_in, *fd_out;
   unsigned int extra_code_bins = 0; \
   unsigned int index = (BinNum - fbob[FirstChar][CodeLength]) >> (12 + nbob_shift[FirstChar] - CodeLength); \
   int temp_index = index; \
-  while ((temp_index > 0) && (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--temp_index]] & 8)) { \
+  while (temp_index && (symbol_type[sym_list_ptrs[FirstChar][CodeLength][--temp_index]] & 8)) { \
     extra_code_bins++; \
   } \
   low -= range * extra_code_bins; \
@@ -1151,13 +1150,12 @@ unsigned char* decode_define(unsigned char* define_string) {
           }
         }
         else {
-if (UTF8_compliant) {
-          DecodeFirstChar(prior_end);
-}
-else {
-          DecodeFirstCharBinary(prior_end);
-}
-
+          if (UTF8_compliant) {
+            DecodeFirstChar(prior_end);
+          }
+          else {
+            DecodeFirstCharBinary(prior_end);
+          }
           DictionaryBins = sum_nbob[FirstChar];
           DecodeDictionaryBin(lookup_bits[FirstChar]);
           if (CodeLength > 12 + nbob_shift[FirstChar]) {
@@ -2110,12 +2108,12 @@ int main(int argc, char* argv[]) {
     while (1) {
       DecodeSymType(LEVEL0);
       if (Symbol == 0) {
-if (UTF8_compliant) {
+        if (UTF8_compliant) {
           DecodeFirstChar(prior_end);
-}
-else {
+        }
+        else {
           DecodeFirstCharBinary(prior_end);
-}
+        }
         DictionaryBins = sum_nbob[FirstChar];
         DecodeDictionaryBin(lookup_bits[FirstChar]);
         if (CodeLength > 12 + nbob_shift[FirstChar]) {
