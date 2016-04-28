@@ -59,7 +59,7 @@ U8 starts[0x00C00000], ends[0x00C00000], symbol_code_lengths[0x00C00000], symbol
 // symbol_type:  bit 0: string ends CAP_CHAR, bit1: string starts a-z, bit 2: non-ergodic, bit 3: in queue
 // bit 4: "word", bit 5: non-"word", bit 6: likely to be followed by ' ', bit 7: not likely to be followed by ' '
 U16 fbob[0x100][26];
-U32 num_define_symbols_written, num_symbols_to_code, mtf_queue_miss_code_space, min_extra_reduce_index;
+U32 num_define_symbols_written, num_grammar_rules, num_symbols_to_code, mtf_queue_miss_code_space, min_extra_reduce_index;
 U32 symbol_index, symbol_to_move, prior_end, rules_reduced;
 U32 symbol_count[0x00C00000], orig_symbol_count[0x00C00000], symbol_inst_found[0x00C00000];
 U32 symbol_array_index[0x00C00000], sorted_symbols[0x00C00000], *define_symbol_start_ptr[0x00C00000];
@@ -1813,6 +1813,7 @@ void embed_define_binary(U32 define_symbol, U8 in_definition) {
     }
   }
   else {
+    num_grammar_rules++;
     symbol_number = define_symbol - START_MY_SYMBOLS;
     this_define_symbol_start_ptr = define_symbol_start_ptr[symbol_number];
     define_string_ptr = this_define_symbol_start_ptr;
@@ -2183,6 +2184,7 @@ void embed_define(U32 define_symbol, U8 in_definition) {
     }
   }
   else {
+    num_grammar_rules++;
     symbol_number = define_symbol - START_MY_SYMBOLS;
     this_define_symbol_start_ptr = define_symbol_start_ptr[symbol_number];
     define_string_ptr = this_define_symbol_start_ptr;
@@ -2361,7 +2363,7 @@ void embed_define(U32 define_symbol, U8 in_definition) {
 int main(int argc, char* argv[]) {
   FILE *fd_in, *fd_out;
   U8 this_char, arg_num, verbose, delta_gap;
-  U32 i1, i2, in_size, num_symbols, num_symbols_defined, num_definitions_to_code, num_chars_to_read;
+  U32 i1, i2, in_size, num_symbols, num_symbols_defined, num_definitions_to_code, num_chars_to_read, grammar_size;
   U32 UTF8_value, max_UTF8_value, this_symbol, this_symbol_count, symbol_inst, prior_inst, end_symbols, next_symbol;
   U32 min_sorted_symbols, sorted_symbols_save, num_sorted_symbols, num_regular_definitions;
   U32 mtf_queue_hits, mtfg_symbols_reduced, mtf_overflow_symbols_to_code;
@@ -2424,6 +2426,15 @@ int main(int argc, char* argv[]) {
   // read the file into local memory
   fseek(fd_in, 0, SEEK_END);
   in_size = ftell(fd_in);
+  if (in_size == 0) {
+    fclose(fd_in);
+    if((fd_out = fopen(argv[arg_num],"wb")) == NULL) {
+      printf("fopen error - file '%s' not found\n",argv[arg_num]);
+      exit(0);
+    }
+    fclose(fd_out);
+    return(0);
+  }
   rewind(fd_in);
 
   in_char_ptr = in_data;
@@ -2651,6 +2662,7 @@ int main(int argc, char* argv[]) {
 
   if (first_define_ptr == 0)
     first_define_ptr = symbol_ptr;
+  grammar_size = symbol_ptr - symbol + 1;
   *symbol_ptr = UNIQUE_CHAR;
   define_symbol_start_ptr[num_symbols_defined] = symbol_ptr + 1;
 
@@ -3135,6 +3147,8 @@ int main(int argc, char* argv[]) {
       printf("\"\n");
     }
   }
+  if (symbol_count[sorted_symbols[0]] <= MAX_INSTANCES_FOR_MTF_QUEUE)
+    max_regular_code_length = symbol_code_lengths[sorted_symbols[0]] - 1;
 
   symbol_type[MAX_DICTIONARY_SIZE - 1] = 0;
   i1 = 0;
@@ -3205,6 +3219,7 @@ int main(int argc, char* argv[]) {
   } while (i1--);
   found_first_symbol = 0;
   prior_end = 0;
+  num_grammar_rules = 1;
 
   fprintf(stderr,"\nuse_mtf %u, mcl %u mrcl %u \n",
       (unsigned int)use_mtf,(unsigned int)max_code_length,(unsigned int)max_regular_code_length);
@@ -3346,8 +3361,9 @@ int main(int argc, char* argv[]) {
   FinishEncoder();
   fprintf(stderr,"Encoded %u level 1 symbols             \n",(unsigned int)(symbol_ptr - symbol));
   fprintf(stderr,"Reduced %u grammar rules\n",rules_reduced);
-  fprintf(stderr,"Compressed file size: %u bytes, grammar size: %u symbols\n",
-      (unsigned int)ftell(fd_out),(unsigned int)num_define_symbols_written);
+  grammar_size -= 2 * rules_reduced;
+  fprintf(stderr,"Compressed file size: %u bytes.  %u grammar rules.  Grammar size: %u symbols\n",
+      (unsigned int)ftell(fd_out),(unsigned int)num_grammar_rules,(unsigned int)grammar_size);
   fclose(fd_out);
   i1 = 0xFF;
   if (UTF8_compliant)

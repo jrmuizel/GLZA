@@ -1540,6 +1540,7 @@ int main(int argc, char* argv[])
   fprintf(stderr,"Read %u byte input file\n",(unsigned int)i1);
 
   // parse the file to determine UTF8_compliant
+  num_compound_symbols = 0;
   UTF8_compliant = 1;
   cap_encoded = *char_buffer & 1;
   delta_gap = *char_buffer >> 1;
@@ -1605,7 +1606,6 @@ int main(int argc, char* argv[])
 
   // parse the file to determine num_compound_symbols and max_UTF8_value
   num_file_symbols = 0;
-  num_compound_symbols = 0;
   in_char_ptr = char_buffer + 1;
 
   if (UTF8_compliant) {
@@ -2756,7 +2756,6 @@ top_sub:
         prior_min_score = min_score;
       }
     }
-
     else if (min_score > 0.000000001) {
       new_min_score = 0.000000001;
       num_node_scores = 1;
@@ -2773,97 +2772,94 @@ top_sub:
     max_scores = (max_scores + 2 * (((29 * (num_simple_symbols + num_compound_symbols - num_start_symbols)) >> 5) + 5000)) / 3;
     if (max_scores > MAX_SCORES)
       max_scores = MAX_SCORES;
-
-    if (num_node_scores == 0) {
-write_file:
-      if ((fd_out = fopen(argv[arg_num],"wb+")) == NULL) {
-        fprintf(stderr,"ERROR - unable to open output file '%s'\n",argv[arg_num]);
-        exit(0);
-      }
-
-      in_char_ptr = char_buffer;
-      *in_char_ptr++ = cap_encoded + (delta_gap * 2);
-      in_symbol_ptr = start_symbol_ptr;
-      if (UTF8_compliant) {
-        while (in_symbol_ptr != end_symbol_ptr) {
-          U32 symbol_value;
-          symbol_value = *in_symbol_ptr++;
-          if (symbol_value < 0x80)
-            *in_char_ptr++ = (U8)symbol_value;
-          else if (symbol_value < 0x800) {
-            *in_char_ptr++ = 0xC0 + (symbol_value >> 6);
-            *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
-          }
-          else if (symbol_value < 0x10000) {
-            *in_char_ptr++ = 0xE0 + (symbol_value >> 12);
-            *in_char_ptr++ = 0x80 + ((symbol_value >> 6) & 0x3F);
-            *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
-          }
-          else if (symbol_value < START_MY_SYMBOLS) {
-            *in_char_ptr++ = 0xF0 + (symbol_value >> 18);
-            *in_char_ptr++ = 0x80 + ((symbol_value >> 12) & 0x3F);
-            *in_char_ptr++ = 0x80 + ((symbol_value >> 6) & 0x3F);
-            *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
-          }
-          else if ((int)symbol_value >= 0) {
-            symbol_value -= START_MY_SYMBOLS;
-            *in_char_ptr++ = INSERT_SYMBOL_CHAR;
-            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
-            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
-            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
-          }
-          else {
-            symbol_value -= 0x80000000 + START_MY_SYMBOLS;
-            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
-            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
-            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
-            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
-          }
-        }
-      }
-      else {
-        while (in_symbol_ptr != end_symbol_ptr) {
-          U32 symbol_value;
-          symbol_value = *in_symbol_ptr++;
-          if (symbol_value < INSERT_SYMBOL_CHAR)
-            *in_char_ptr++ = (U8)symbol_value;
-          else if (symbol_value == INSERT_SYMBOL_CHAR) {
-            *in_char_ptr++ = INSERT_SYMBOL_CHAR;
-            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
-          }
-          else if (symbol_value == DEFINE_SYMBOL_CHAR) {
-            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
-            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
-          }
-          else if ((int)symbol_value >= 0) {
-            symbol_value -= 0x100;
-            *in_char_ptr++ = INSERT_SYMBOL_CHAR;
-            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
-            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
-            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
-          }
-          else {
-            symbol_value -= 0x80000000 + 0x100;
-            *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
-            *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
-            *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
-            *in_char_ptr++ = (U8)(symbol_value & 0xFF);
-          }
-        }
-      }
-
-      in_size = in_char_ptr - char_buffer;
-      write_ptr = char_buffer;
-      while (write_ptr + MAX_WRITE_SIZE < char_buffer + in_size) {
-        fwrite(write_ptr,1,MAX_WRITE_SIZE,fd_out);
-        write_ptr += MAX_WRITE_SIZE;
-        fflush(fd_out);
-      }
-      fwrite(write_ptr,1,char_buffer+in_size-write_ptr,fd_out);
-      fclose(fd_out);
-    }
   } while (num_node_scores);
 
+write_file:
+  if ((fd_out = fopen(argv[arg_num],"wb+")) == NULL) {
+    fprintf(stderr,"ERROR - unable to open output file '%s'\n",argv[arg_num]);
+    exit(0);
+  }
+  if (in_size) {
+    in_char_ptr = char_buffer;
+    *in_char_ptr++ = cap_encoded + (delta_gap * 2);
+    in_symbol_ptr = start_symbol_ptr;
+    if (UTF8_compliant) {
+      while (in_symbol_ptr != end_symbol_ptr) {
+        U32 symbol_value;
+        symbol_value = *in_symbol_ptr++;
+        if (symbol_value < 0x80)
+          *in_char_ptr++ = (U8)symbol_value;
+        else if (symbol_value < 0x800) {
+          *in_char_ptr++ = 0xC0 + (symbol_value >> 6);
+          *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
+        }
+        else if (symbol_value < 0x10000) {
+          *in_char_ptr++ = 0xE0 + (symbol_value >> 12);
+          *in_char_ptr++ = 0x80 + ((symbol_value >> 6) & 0x3F);
+          *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
+        }
+        else if (symbol_value < START_MY_SYMBOLS) {
+          *in_char_ptr++ = 0xF0 + (symbol_value >> 18);
+          *in_char_ptr++ = 0x80 + ((symbol_value >> 12) & 0x3F);
+          *in_char_ptr++ = 0x80 + ((symbol_value >> 6) & 0x3F);
+          *in_char_ptr++ = 0x80 + (symbol_value & 0x3F);
+        }
+        else if ((int)symbol_value >= 0) {
+          symbol_value -= START_MY_SYMBOLS;
+          *in_char_ptr++ = INSERT_SYMBOL_CHAR;
+          *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+          *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+          *in_char_ptr++ = (U8)(symbol_value & 0xFF);
+        }
+        else {
+          symbol_value -= 0x80000000 + START_MY_SYMBOLS;
+          *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+          *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+          *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+          *in_char_ptr++ = (U8)(symbol_value & 0xFF);
+        }
+      }
+    }
+    else {
+      while (in_symbol_ptr != end_symbol_ptr) {
+        U32 symbol_value;
+        symbol_value = *in_symbol_ptr++;
+        if (symbol_value < INSERT_SYMBOL_CHAR)
+          *in_char_ptr++ = (U8)symbol_value;
+        else if (symbol_value == INSERT_SYMBOL_CHAR) {
+          *in_char_ptr++ = INSERT_SYMBOL_CHAR;
+          *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+        }
+        else if (symbol_value == DEFINE_SYMBOL_CHAR) {
+          *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+          *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+        }
+        else if ((int)symbol_value >= 0) {
+          symbol_value -= 0x100;
+          *in_char_ptr++ = INSERT_SYMBOL_CHAR;
+          *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+          *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+          *in_char_ptr++ = (U8)(symbol_value & 0xFF);
+        }
+        else {
+          symbol_value -= 0x80000000 + 0x100;
+          *in_char_ptr++ = DEFINE_SYMBOL_CHAR;
+          *in_char_ptr++ = (U8)((symbol_value >> 16) & 0xFF);
+          *in_char_ptr++ = (U8)((symbol_value >> 8) & 0xFF);
+          *in_char_ptr++ = (U8)(symbol_value & 0xFF);
+        }
+      }
+    }
+    in_size = in_char_ptr - char_buffer;
+    write_ptr = char_buffer;
+    while (write_ptr + MAX_WRITE_SIZE < char_buffer + in_size) {
+      fwrite(write_ptr,1,MAX_WRITE_SIZE,fd_out);
+      write_ptr += MAX_WRITE_SIZE;
+      fflush(fd_out);
+    }
+    fwrite(write_ptr,1,char_buffer+in_size-write_ptr,fd_out);
+  }
+  fclose(fd_out);
   free(start_symbol_ptr);
   fprintf(stderr,"Constructed %u rule grammar in %0.3f seconds.\n",
       num_compound_symbols,(float)(clock()-start_time)/CLOCKS_PER_SEC);

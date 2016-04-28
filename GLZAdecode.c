@@ -2105,10 +2105,8 @@ int main(int argc, char* argv[]) {
     printf("fopen error - file '%s' not found\n",argv[arg_num]);
     exit(0);
   }
-  if (fread(out_char0,1,5,fd_in) != 5) {
-    printf("Error - bad input file\n");
-    exit(0);
-  }
+  if (fread(out_char0,1,5,fd_in) != 5)
+    goto finish_decode;
 
   cap_encoded = out_char0[0] >> 7;
   UTF8_compliant = (out_char0[0] >> 6) & 1;
@@ -2349,6 +2347,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
+finish_decode:
   if (two_threads)
     done_parsing = 1;
   i1 = 0xFF;

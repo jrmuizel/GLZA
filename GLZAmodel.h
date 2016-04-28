@@ -866,12 +866,12 @@ void InitEncoder(FILE* EncodedFile, U8 num_inst_codes) {
   StartModelINST(num_inst_codes);
   StartModelERG();
   StartModelWordTag();
-if (cap_encoded || UTF8_compliant) {
-  StartModelFirstChar();
-}
-else {
-  StartModelFirstCharBinary();
-}
+  if (cap_encoded || UTF8_compliant) {
+    StartModelFirstChar();
+  }
+  else {
+    StartModelFirstCharBinary();
+  }
 }
 void FinishEncoder() {
   while (low ^ (low + range)) {
@@ -1286,12 +1286,12 @@ void InitDecoder(FILE* EncodedFile, U8 num_inst_codes) {
   StartModelINST(num_inst_codes);
   StartModelERG();
   StartModelWordTag();
-if (cap_encoded || UTF8_compliant) {
-  StartModelFirstChar();
-}
-else {
-  StartModelFirstCharBinary();
-}
+  if (cap_encoded || UTF8_compliant) {
+    StartModelFirstChar();
+  }
+  else {
+    StartModelFirstCharBinary();
+  }
 }
 #endif
 
