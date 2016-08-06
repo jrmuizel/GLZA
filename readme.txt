@@ -36,9 +36,9 @@ Usage:
        -d0 disables delta encoding
        -l0 disables capital lock encoding
 
-   GLZAcompress [-m#] [-p#] [-r#] [-w0] <infilename> <outfilename>
+   GLZAcompress [-c#] [-p#] [-r#] [-w0] <infilename> <outfilename>
      where
-       -m# sets the production cost, default 6.0
+       -c# sets the production cost, default 6.0
        -p# sets the profit ratio weighting power, default 2.0 for capital encoded or UTF8 compliant files, 0.5 otherwise
            (0.0 is approximately most compressive bitwise, ie. maximizing the order 0 profit of new productions)
        -r# sets the approximate RAM usage in millions of bytes
